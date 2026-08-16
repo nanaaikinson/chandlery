@@ -192,7 +192,19 @@ func TestRepository_Update(t *testing.T) {
 	if err := repo.Create(ctx, it); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	createdAt := it.CreatedAt
+
+	// Compare against CreatedAt as Postgres actually stored it, not the
+	// in-memory pre-insert value: Postgres timestamptz only has microsecond
+	// precision, so an in-memory time.Time (nanosecond precision) essentially
+	// never round-trips as Equal - it only happened to pass locally because
+	// the local clock's sub-microsecond bits were often already zero, and
+	// failed on CI's Linux runners where they weren't.
+	before, err := repo.GetOne(ctx, func(q *bun.SelectQuery) *bun.SelectQuery {
+		return q.Where("id = ?", it.ID)
+	})
+	if err != nil {
+		t.Fatalf("GetOne (before update): %v", err)
+	}
 
 	it.Price = 200
 	if err := repo.Update(ctx, it); err != nil {
@@ -208,8 +220,8 @@ func TestRepository_Update(t *testing.T) {
 	if got.Price != 200 {
 		t.Errorf("Price = %d, want %d", got.Price, 200)
 	}
-	if !got.CreatedAt.Equal(createdAt) {
-		t.Errorf("CreatedAt changed on Update: got %v, want %v", got.CreatedAt, createdAt)
+	if !got.CreatedAt.Equal(before.CreatedAt) {
+		t.Errorf("CreatedAt changed on Update: got %v, want %v", got.CreatedAt, before.CreatedAt)
 	}
 }
 
