@@ -24,15 +24,20 @@ Requires Go 1.26.3+.
 - [`respond`](respond) — a standard JSON response envelope, framework-agnostic
   at its core, with adapters for [`net/http`](respond/nethttp) and
   [Fiber v3](respond/fiber).
+- [`cache`](cache) — a driver-agnostic `Store` contract (`Get`, `Put`, `Add`,
+  `Forever`, `Pull`, `Forget`, `Has`, `Increment`/`Decrement`, `Flush`), with
+  backends in their own subpackage: [`cache/memory`](cache/memory) (in-process
+  map) and [`cache/redis`](cache/redis) (real Redis, via
+  [go-redis](https://github.com/redis/go-redis)).
 
 Each package is usable on its own; none of them import each other except
-where noted (the `respond` adapters depend on `respond`'s core).
+where noted (the `respond` adapters depend on `respond`'s core, and the
+`cache` backends depend on `cache`'s core).
 
 ## Status
 
-Early — API may still shift before v1. `cache` and `storage` packages
-(memory/Redis, local/S3) are planned but not yet implemented, so they aren't
-part of this release.
+Early — API may still shift before v1. `storage` (local/S3) is planned but
+not yet implemented, so it isn't part of this release.
 
 ## License
 

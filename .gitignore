@@ -8,6 +8,13 @@
 *.so
 *.dylib
 
+# go build's default extensionless output for a package main directory
+# (e.g. `go build ./...` run from inside examples/fiber leaves a `fiber`
+# binary right next to fiber.go) — every examples/*/<dirname> program falls
+# here.
+/examples/*/fiber
+/examples/*/nethttp
+
 # Test binary, built with `go test -c`
 *.test
 

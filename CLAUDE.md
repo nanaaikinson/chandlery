@@ -13,23 +13,31 @@ and no `config`/`clock`/`errs` packages — test against what's actually here:
 
 - **Pure logic** — `env`'s `GetInt`/`GetBool`/`GetSlice`/`castString`
   coercions, `validator.SanitizeIssues`'s zog-issue-to-field grouping,
-  `respond.TypeForStatus`'s status→type mapping, and the "not actually a
+  `respond.TypeForStatus`'s status→type mapping, the "not actually a
   Postgres error" branch of `db/postgres`'s `UniqueViolation`/
   `ForeignKeyViolation` (the real-SQLSTATE branch needs a live connection —
-  see below). Table-driven unit tests, no external dependencies.
-  Millisecond-fast, always run.
+  see below), and `cache/memory` (an in-process map, not a real dependency —
+  it runs `cache`'s shared conformance suite with a `WithClock` fake clock
+  standing in for TTL expiry instead of sleeping). Table-driven unit tests,
+  no external dependencies. Millisecond-fast, always run.
 - **Anything touching a real dependency** — `db` (bun's generic
   `Repository[T]`/`Model` against a real Postgres — the dialect itself
   doesn't matter to this package, Postgres is just the available backend to
   test against), `db/postgres` (its connection builder via `DB_URL` plus
-  real unique/FK-violation SQLSTATEs), and `storage/s3` / `cache`'s real
-  backends once those currently-empty stub packages grow implementations.
-  Integration test against a testcontainer, behind `//go:build integration`,
-  each test isolated in its own rolled-back transaction (`bun.Tx` satisfies
-  `bun.IDB`) rather than sharing table state across parallel tests. Test the
-  behavior you actually depend on (a real unique-constraint violation
-  surfacing through `UniqueViolation`, `ConditionalUpdate` staying race-free
-  under a guarded WHERE), not that bun/pgdriver work.
+  real unique/FK-violation SQLSTATEs), `cache/redis` (its `REDIS_URL`
+  connection builder, plus the same conformance suite run against a real
+  server — TTL expiry there means actually waiting out a short real ttl,
+  since nothing can fast-forward Redis's own clock), and `storage/s3` once
+  that currently-empty stub package grows an implementation. Integration
+  test against a testcontainer, behind `//go:build integration`, each `db`
+  test isolated in its own rolled-back transaction (`bun.Tx` satisfies
+  `bun.IDB`) rather than sharing table state across parallel tests, and each
+  `cache/redis` test isolated by giving every `Store` its own key prefix
+  rather than sharing one keyspace. Test the behavior you actually depend on
+  (a real unique-constraint violation surfacing through `UniqueViolation`,
+  `ConditionalUpdate` staying race-free under a guarded WHERE, `Flush`'s
+  `SCAN` only ever touching its own prefix), not that bun/pgdriver/go-redis
+  work.
 - **`respond/fiber` and `respond/nethttp`** — `httptest.NewRecorder`
   (nethttp) / Fiber's `app.Test` (fiber). Assert the JSON envelope
   (`{message, type, errors}` — this repo doesn't use problem+json) and
@@ -37,19 +45,24 @@ and no `config`/`clock`/`errs` packages — test against what's actually here:
   error-mapping path: a `*respond.StatusError`, a native framework error,
   and an unmapped error each need to land on the right status/type and the
   5xx case needs to actually log.
-- **Contracts** — `cache` and `storage` are each meant to grow multiple
-  backends (memory/redis; local/s3) behind one interface. No tests on the
-  interface itself once it's written; every backend instead runs a shared
-  conformance suite (e.g. `cache.TestConformance(t, factory)`) so memory and
-  redis are held to identical guarantees.
+- **Contracts** — `cache` (backends: `cache/memory`, `cache/redis`) and
+  `storage` (planned backends: `local`/`s3`) are each meant to grow multiple
+  backends behind one interface. No tests on the interface itself; every
+  backend instead runs `cache`'s shared conformance suite
+  (`cache.TestConformance(t, factory)` plus `TestFlushRequiresPrefix`) so
+  memory and redis are held to identical guarantees. `storage` gets the same
+  treatment once it grows a second backend.
 - **Architecture invariants** — `db`'s root package (generic `Repository[T]`/
   `Model`) must never import `db/postgres` or any future sibling driver
   package — that split is what makes `db` reusable across drivers instead of
   Postgres-only; `db/postgres` is the only place that imports
-  `bun/driver/pgdriver` or a Postgres-specific error code. Same principle
-  once `cache`/`storage` grow adapter subpackages (`memory`/`redis`,
-  `local`/`s3`): the root package stays free of them, mirroring `respond`'s
-  core (`respond.go`) staying free of any `fiber`/`net/http` import. Nothing
+  `bun/driver/pgdriver` or a Postgres-specific error code. `cache` follows
+  the same split already: its root package (`Store` interface, `ErrNoPrefix`,
+  the conformance suite) never imports `cache/memory` or `cache/redis`, and
+  `cache/redis` is the only place that imports `go-redis`. Same principle
+  once `storage` grows adapter subpackages (`local`/`s3`): the root package
+  stays free of them, mirroring `respond`'s core (`respond.go`) staying free
+  of any `fiber`/`net/http` import. Nothing
   currently enforces this mechanically (no import-linter test yet) — worth
   adding one if the driver list grows past two.
 
@@ -66,7 +79,13 @@ Conventions:
 - No `clock` package exists yet. If timing-sensitive logic lands (token
   expiry, TTLs), inject the current time via a parameter or func field
   rather than calling `time.Now()` inside the logic, so a test can supply a
-  fixed instant. No `time.Sleep` in tests.
+  fixed instant. No `time.Sleep` in tests — except a real, external clock
+  neither this repo nor the test controls (e.g. `cache/redis`'s TTL, which
+  expires on Redis's own server-side clock): `cache/redis/redis_integration_test.go`'s
+  `realAdvance` sleeps for real rather than faking it, since there's nothing
+  else to fast-forward. If you find yourself reaching for `time.Sleep`
+  anywhere else, that's very likely a sign the code under test should take
+  its clock as a parameter instead.
 - `db.Model`/`db.IdentityModel` only auto-assign a ULID via
   `BeforeAppendModel` when `ID` is unset — a test needing a deterministic ID
   just sets it explicitly before insert instead of asserting on a real
