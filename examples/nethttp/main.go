@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,7 +26,10 @@ import (
 	"github.com/nanaaikinson/chandlery/env"
 	"github.com/nanaaikinson/chandlery/examples/internal/app"
 	"github.com/nanaaikinson/chandlery/examples/internal/task"
+	"github.com/nanaaikinson/chandlery/respond"
 	respondhttp "github.com/nanaaikinson/chandlery/respond/nethttp"
+	"github.com/nanaaikinson/chandlery/storage"
+	"github.com/nanaaikinson/chandlery/storage/local"
 	validatornethttp "github.com/nanaaikinson/chandlery/validator/nethttp"
 )
 
@@ -66,11 +70,29 @@ func run() error {
 	}
 	defer closeCache()
 
+	port := env.Get("PORT", "8080")
+	storageDriver := env.Get("STORAGE_DRIVER", "local")
+	// Only meaningful for the local driver, to build a signed URL that
+	// resolves back to this app's own /storage route below — s3's signed
+	// URLs point at the S3 endpoint directly and ignore this. TrimSuffix
+	// matters: appURL+"/storage" without it would double a trailing slash
+	// in APP_URL into a base URL like "http://host//storage", which the
+	// registered route "/storage/{path...}" would never match.
+	appURL := strings.TrimSuffix(env.Get("APP_URL", "http://localhost:"+port), "/")
+	storageDisk, closeStorage, err := task.NewStorageDisk(setupCtx, storageDriver,
+		env.Get("STORAGE_LOCAL_ROOT", "./storage-example-nethttp"), appURL+"/storage",
+		env.Get("S3_BUCKET", "chandlery-example"), "chandlery-nethttp-example/")
+	if err != nil {
+		return err
+	}
+	defer closeStorage()
+
 	h := &handlers{
-		db:    bunDB,
-		repo:  db.NewRepository[*task.Task](bunDB),
-		cache: cacheStore,
-		ttl:   time.Duration(env.GetInt("CACHE_TTL_SECONDS", 60)) * time.Second,
+		db:      bunDB,
+		repo:    db.NewRepository[*task.Task](bunDB),
+		cache:   cacheStore,
+		ttl:     time.Duration(env.GetInt("CACHE_TTL_SECONDS", 60)) * time.Second,
+		storage: storageDisk,
 	}
 
 	mux := http.NewServeMux()
@@ -81,8 +103,52 @@ func run() error {
 	mux.Handle("PATCH /tasks/{id}", validatornethttp.ValidateRequest[task.PatchRequest](task.PatchSchema)(respondhttp.Wrap(h.updateTask)))
 	mux.Handle("DELETE /tasks/{id}", respondhttp.Wrap(h.deleteTask))
 
+	mux.Handle("PUT /tasks/{id}/attachment", respondhttp.Wrap(h.uploadAttachment))
+	mux.Handle("GET /tasks/{id}/attachment", respondhttp.Wrap(h.downloadAttachment))
+	mux.Handle("DELETE /tasks/{id}/attachment", respondhttp.Wrap(h.deleteAttachment))
+	mux.Handle("GET /tasks/{id}/attachment/url", respondhttp.Wrap(h.attachmentURL))
+
+	// The local driver's signed URLs point back at this app (it's the only
+	// thing that can serve them); s3's point straight at the S3 endpoint,
+	// so there's nothing for this app to serve in that case.
+	if localDisk, ok := storageDisk.(*local.Disk); ok {
+		mux.Handle("GET /storage/{path...}", respondhttp.Wrap(serveSignedLocalFile(localDisk)))
+	}
+
 	handler := http.TimeoutHandler(withRequestID(mux), requestTimeout, `{"message":"request timed out","type":"internal_error"}`)
-	return serve(handler, env.Get("PORT", "8080"))
+	return serve(handler, port)
+}
+
+// serveSignedLocalFile verifies the requesting URL's signature (minted by
+// storage/local's TemporaryUrl) before serving the file it names — the
+// "whatever handler does" storage/local's own doc comments point to.
+func serveSignedLocalFile(d *local.Disk) respondhttp.Handler {
+	return func(w http.ResponseWriter, r *http.Request) error {
+		ctx := r.Context()
+
+		// VerifySignedURL only ever looks at the path/query, so the
+		// request-URI alone is enough — no need to reconstruct scheme+host.
+		p, ok := d.VerifySignedURL(r.URL.RequestURI(), http.MethodGet)
+		if !ok {
+			return respond.NewStatusError(http.StatusForbidden, "invalid or expired signature")
+		}
+
+		data, err := d.Get(ctx, p)
+		if err != nil {
+			if errors.Is(err, storage.ErrFileNotFound) {
+				return respond.NewStatusError(http.StatusNotFound, "file not found")
+			}
+			return respond.NewStatusError(http.StatusInternalServerError, "failed to read file", err)
+		}
+
+		contentType, err := d.ContentType(ctx, p)
+		if err != nil {
+			contentType = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", contentType)
+		_, writeErr := w.Write(data)
+		return writeErr
+	}
 }
 
 // withRequestID assigns a request ID (reusing one an upstream proxy already

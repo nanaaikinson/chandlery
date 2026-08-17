@@ -16,10 +16,13 @@ and no `config`/`clock`/`errs` packages — test against what's actually here:
   `respond.TypeForStatus`'s status→type mapping, the "not actually a
   Postgres error" branch of `db/postgres`'s `UniqueViolation`/
   `ForeignKeyViolation` (the real-SQLSTATE branch needs a live connection —
-  see below), and `cache/memory` (an in-process map, not a real dependency —
+  see below), `cache/memory` (an in-process map, not a real dependency —
   it runs `cache`'s shared conformance suite with a `WithClock` fake clock
-  standing in for TTL expiry instead of sleeping). Table-driven unit tests,
-  no external dependencies. Millisecond-fast, always run.
+  standing in for TTL expiry instead of sleeping), and `storage/local` (the
+  local filesystem via a `t.TempDir()` root, sandboxed by `os.Root` — real
+  I/O, but no external service, so it runs `storage`'s shared conformance
+  suite same as any other fast test). Table-driven unit tests, no external
+  dependencies. Millisecond-fast, always run.
 - **Anything touching a real dependency** — `db` (bun's generic
   `Repository[T]`/`Model` against a real Postgres — the dialect itself
   doesn't matter to this package, Postgres is just the available backend to
@@ -27,17 +30,21 @@ and no `config`/`clock`/`errs` packages — test against what's actually here:
   real unique/FK-violation SQLSTATEs), `cache/redis` (its `REDIS_URL`
   connection builder, plus the same conformance suite run against a real
   server — TTL expiry there means actually waiting out a short real ttl,
-  since nothing can fast-forward Redis's own clock), and `storage/s3` once
-  that currently-empty stub package grows an implementation. Integration
-  test against a testcontainer, behind `//go:build integration`, each `db`
-  test isolated in its own rolled-back transaction (`bun.Tx` satisfies
-  `bun.IDB`) rather than sharing table state across parallel tests, and each
-  `cache/redis` test isolated by giving every `Store` its own key prefix
-  rather than sharing one keyspace. Test the behavior you actually depend on
-  (a real unique-constraint violation surfacing through `UniqueViolation`,
-  `ConditionalUpdate` staying race-free under a guarded WHERE, `Flush`'s
-  `SCAN` only ever touching its own prefix), not that bun/pgdriver/go-redis
-  work.
+  since nothing can fast-forward Redis's own clock), and `storage/s3` (its
+  `S3_ENDPOINT`/`S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY` connection
+  builder, plus `storage`'s conformance suite run against a real MinIO
+  container). Integration test against a testcontainer, behind
+  `//go:build integration`, each `db` test isolated in its own rolled-back
+  transaction (`bun.Tx` satisfies `bun.IDB`) rather than sharing table state
+  across parallel tests, each `cache/redis` test isolated by giving every
+  `Store` its own key prefix rather than sharing one keyspace, and each
+  `storage/s3` test isolated the same way — every `Disk` its own key prefix
+  within one shared bucket, rather than one bucket per test. Test the
+  behavior you actually depend on (a real unique-constraint violation
+  surfacing through `UniqueViolation`, `ConditionalUpdate` staying race-free
+  under a guarded WHERE, `Flush`'s `SCAN` only ever touching its own prefix,
+  `storage/local`'s sandbox actually rejecting a `..`-escaping path), not
+  that bun/pgdriver/go-redis/minio-go work.
 - **`respond/fiber` and `respond/nethttp`** — `httptest.NewRecorder`
   (nethttp) / Fiber's `app.Test` (fiber). Assert the JSON envelope
   (`{message, type, errors}` — this repo doesn't use problem+json) and
@@ -46,25 +53,24 @@ and no `config`/`clock`/`errs` packages — test against what's actually here:
   and an unmapped error each need to land on the right status/type and the
   5xx case needs to actually log.
 - **Contracts** — `cache` (backends: `cache/memory`, `cache/redis`) and
-  `storage` (planned backends: `local`/`s3`) are each meant to grow multiple
+  `storage` (backends: `storage/local`, `storage/s3`) each grow multiple
   backends behind one interface. No tests on the interface itself; every
-  backend instead runs `cache`'s shared conformance suite
-  (`cache.TestConformance(t, factory)` plus `TestFlushRequiresPrefix`) so
-  memory and redis are held to identical guarantees. `storage` gets the same
-  treatment once it grows a second backend.
+  backend instead runs its package's shared conformance suite
+  (`cache.TestConformance(t, factory)` plus `TestFlushRequiresPrefix`;
+  `storage.TestConformance(t, factory)`) so, e.g., memory and redis — or
+  local and s3 — are held to identical guarantees.
 - **Architecture invariants** — `db`'s root package (generic `Repository[T]`/
   `Model`) must never import `db/postgres` or any future sibling driver
   package — that split is what makes `db` reusable across drivers instead of
   Postgres-only; `db/postgres` is the only place that imports
-  `bun/driver/pgdriver` or a Postgres-specific error code. `cache` follows
-  the same split already: its root package (`Store` interface, `ErrNoPrefix`,
-  the conformance suite) never imports `cache/memory` or `cache/redis`, and
-  `cache/redis` is the only place that imports `go-redis`. Same principle
-  once `storage` grows adapter subpackages (`local`/`s3`): the root package
-  stays free of them, mirroring `respond`'s core (`respond.go`) staying free
-  of any `fiber`/`net/http` import. Nothing
-  currently enforces this mechanically (no import-linter test yet) — worth
-  adding one if the driver list grows past two.
+  `bun/driver/pgdriver` or a Postgres-specific error code. `cache` and
+  `storage` follow the same split: neither root package (`Store`/`Disk`
+  interface, sentinel errors, the conformance suite) imports its own
+  backend subpackages — `cache/redis` is the only place that imports
+  `go-redis`, `storage/s3` the only place that imports `minio-go`, mirroring
+  `respond`'s core (`respond.go`) staying free of any `fiber`/`net/http`
+  import. Nothing currently enforces this mechanically (no import-linter
+  test yet) — worth adding one if either driver list grows past two.
 
 Conventions:
 

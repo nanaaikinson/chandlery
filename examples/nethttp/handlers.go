@@ -19,6 +19,7 @@ import (
 	"github.com/nanaaikinson/chandlery/examples/internal/task"
 	"github.com/nanaaikinson/chandlery/respond"
 	respondhttp "github.com/nanaaikinson/chandlery/respond/nethttp"
+	"github.com/nanaaikinson/chandlery/storage"
 	validatornethttp "github.com/nanaaikinson/chandlery/validator/nethttp"
 )
 
@@ -26,10 +27,11 @@ import (
 // in main and hanging methods off it (rather than closing over globals)
 // keeps each handler a plain, testable function of its own state.
 type handlers struct {
-	db    *bun.DB
-	repo  db.Repository[*task.Task]
-	cache cache.Store
-	ttl   time.Duration
+	db      *bun.DB
+	repo    db.Repository[*task.Task]
+	cache   cache.Store
+	ttl     time.Duration
+	storage storage.Disk
 }
 
 func (h *handlers) healthz(w http.ResponseWriter, r *http.Request) error {
@@ -199,6 +201,13 @@ func (h *handlers) deleteTask(w http.ResponseWriter, r *http.Request) error {
 
 	h.invalidateCache(ctx, task.CacheKey(id))
 
+	// Best-effort, logged rather than failing the request: the task row is
+	// already gone, and leaving an orphaned attachment behind is a smaller
+	// problem than reporting a successful delete as failed.
+	if err := h.storage.Delete(ctx, task.AttachmentKey(id)); err != nil {
+		slog.Warn("attachment cleanup failed", "id", id, "error", err)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
@@ -212,4 +221,93 @@ func (h *handlers) invalidateCache(ctx context.Context, key string) {
 	if err := h.cache.Forget(ctx, key); err != nil {
 		slog.Warn("cache invalidation failed", "key", key, "error", err)
 	}
+}
+
+// attachmentTTL is how long an attachmentURL response's signed link stays
+// valid.
+const attachmentTTL = 15 * time.Minute
+
+func (h *handlers) uploadAttachment(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	id := r.PathValue("id")
+
+	exists, err := h.repo.Exists(ctx, func(q *bun.SelectQuery) *bun.SelectQuery {
+		return q.Where("id = ?", id)
+	})
+	if err != nil {
+		return respond.NewStatusError(http.StatusInternalServerError, "failed to look up task", err)
+	}
+	if !exists {
+		return respond.NewStatusError(http.StatusNotFound, "task not found")
+	}
+
+	// Explicit rather than left unbounded: unlike Fiber (capped by
+	// Config.BodyLimit in main.go), net/http's default http.Server has no
+	// request-body limit at all, so without this an oversized PUT would
+	// stream straight through to storage.Put where Fiber would have
+	// already rejected it.
+	r.Body = http.MaxBytesReader(w, r.Body, task.MaxAttachmentSize)
+	if err := h.storage.Put(ctx, task.AttachmentKey(id), r.Body); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return respond.NewStatusError(http.StatusRequestEntityTooLarge, "attachment too large")
+		}
+		return respond.NewStatusError(http.StatusInternalServerError, "failed to store attachment", err)
+	}
+
+	return respondhttp.OK(w, "attachment uploaded")
+}
+
+func (h *handlers) downloadAttachment(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	key := task.AttachmentKey(r.PathValue("id"))
+
+	data, err := h.storage.Get(ctx, key)
+	if err != nil {
+		if errors.Is(err, storage.ErrFileNotFound) {
+			return respond.NewStatusError(http.StatusNotFound, "no attachment for this task")
+		}
+		return respond.NewStatusError(http.StatusInternalServerError, "failed to load attachment", err)
+	}
+
+	// Best-effort: an undetectable type still serves the bytes rather than
+	// failing a download that already succeeded.
+	contentType, err := h.storage.ContentType(ctx, key)
+	if err != nil {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	_, writeErr := w.Write(data)
+	return writeErr
+}
+
+func (h *handlers) deleteAttachment(w http.ResponseWriter, r *http.Request) error {
+	if err := h.storage.Delete(r.Context(), task.AttachmentKey(r.PathValue("id"))); err != nil {
+		return respond.NewStatusError(http.StatusInternalServerError, "failed to delete attachment", err)
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+// attachmentURL hands back a time-limited link instead of streaming the
+// file through this handler: a real client downloads straight from S3 (or,
+// on the local driver, from this app's own /storage route — see main.go)
+// rather than doubling this process's bandwidth as a proxy.
+func (h *handlers) attachmentURL(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	key := task.AttachmentKey(r.PathValue("id"))
+
+	exists, err := h.storage.Exists(ctx, key)
+	if err != nil {
+		return respond.NewStatusError(http.StatusInternalServerError, "failed to look up attachment", err)
+	}
+	if !exists {
+		return respond.NewStatusError(http.StatusNotFound, "no attachment for this task")
+	}
+
+	url, err := h.storage.TemporaryUrl(ctx, key, attachmentTTL)
+	if err != nil {
+		return respond.NewStatusError(http.StatusInternalServerError, "failed to sign url", err)
+	}
+	return respondhttp.Data(w, http.StatusOK, task.AttachmentURL{URL: url, ExpiresInSeconds: int(attachmentTTL.Seconds())})
 }

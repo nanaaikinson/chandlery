@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,7 +27,10 @@ import (
 	"github.com/nanaaikinson/chandlery/env"
 	"github.com/nanaaikinson/chandlery/examples/internal/app"
 	"github.com/nanaaikinson/chandlery/examples/internal/task"
+	"github.com/nanaaikinson/chandlery/respond"
 	respondfiber "github.com/nanaaikinson/chandlery/respond/fiber"
+	"github.com/nanaaikinson/chandlery/storage"
+	"github.com/nanaaikinson/chandlery/storage/local"
 	validatorfiber "github.com/nanaaikinson/chandlery/validator/fiber"
 )
 
@@ -68,14 +73,39 @@ func run() error {
 	}
 	defer closeCache()
 
+	port := env.Get("PORT", "8080")
+	storageDriver := env.Get("STORAGE_DRIVER", "local")
+	// Only meaningful for the local driver, to build a signed URL that
+	// resolves back to this app's own /storage route below — s3's signed
+	// URLs point at the S3 endpoint directly and ignore this. TrimSuffix
+	// matters: appURL+"/storage" without it would double a trailing slash
+	// in APP_URL into a base URL like "http://host//storage", which the
+	// registered route "/storage/*" would never match.
+	appURL := strings.TrimSuffix(env.Get("APP_URL", "http://localhost:"+port), "/")
+	storageDisk, closeStorage, err := task.NewStorageDisk(setupCtx, storageDriver,
+		env.Get("STORAGE_LOCAL_ROOT", "./storage-example-fiber"), appURL+"/storage",
+		env.Get("S3_BUCKET", "chandlery-example"), "chandlery-fiber-example/")
+	if err != nil {
+		return err
+	}
+	defer closeStorage()
+
 	h := &handlers{
-		db:    bunDB,
-		repo:  db.NewRepository[*task.Task](bunDB),
-		cache: cacheStore,
-		ttl:   time.Duration(env.GetInt("CACHE_TTL_SECONDS", 60)) * time.Second,
+		db:      bunDB,
+		repo:    db.NewRepository[*task.Task](bunDB),
+		cache:   cacheStore,
+		ttl:     time.Duration(env.GetInt("CACHE_TTL_SECONDS", 60)) * time.Second,
+		storage: storageDisk,
 	}
 
-	fiberApp := gofiber.New(gofiber.Config{ErrorHandler: respondfiber.ErrorHandler})
+	fiberApp := gofiber.New(gofiber.Config{
+		ErrorHandler: respondfiber.ErrorHandler,
+		// Explicit rather than left at Fiber's own 4MiB default: this needs
+		// to match net/http's cap on the same conceptual endpoint (see
+		// examples/nethttp/handlers.go's uploadAttachment), and an implicit
+		// per-framework default can't do that.
+		BodyLimit: task.MaxAttachmentSize,
+	})
 	// Wires the request ID respondfiber.ErrorHandler's 5xx logging reads via
 	// requestid.FromContext.
 	fiberApp.Use(requestid.New())
@@ -91,7 +121,53 @@ func run() error {
 	fiberApp.Patch("/tasks/:id", validatorfiber.ValidateRequest[task.PatchRequest](task.PatchSchema), withTimeout(h.updateTask))
 	fiberApp.Delete("/tasks/:id", withTimeout(h.deleteTask))
 
-	return serve(fiberApp, env.Get("PORT", "8080"))
+	fiberApp.Put("/tasks/:id/attachment", withTimeout(h.uploadAttachment))
+	fiberApp.Get("/tasks/:id/attachment", withTimeout(h.downloadAttachment))
+	fiberApp.Delete("/tasks/:id/attachment", withTimeout(h.deleteAttachment))
+	fiberApp.Get("/tasks/:id/attachment/url", withTimeout(h.attachmentURL))
+
+	// The local driver's signed URLs point back at this app (it's the only
+	// thing that can serve them); s3's point straight at the S3 endpoint,
+	// so there's nothing for this app to serve in that case.
+	if localDisk, ok := storageDisk.(*local.Disk); ok {
+		fiberApp.Get("/storage/*", withTimeout(serveSignedLocalFile(localDisk)))
+	}
+
+	return serve(fiberApp, port)
+}
+
+// serveSignedLocalFile verifies the requesting URL's signature (minted by
+// storage/local's TemporaryUrl) before serving the file it names — the
+// "whatever handler does" storage/local's own doc comments point to.
+func serveSignedLocalFile(d *local.Disk) gofiber.Handler {
+	return func(c gofiber.Ctx) error {
+		ctx := c.Context()
+
+		// VerifySignedURL only ever looks at the path/query, so the
+		// request-URI alone is enough — no need to reconstruct scheme+host.
+		// http.MethodGet, not a "GET" literal, so a future copy-paste (e.g.
+		// a PUT-serving route) that mistypes the method fails to compile
+		// instead of silently 403ing every request.
+		p, ok := d.VerifySignedURL(c.OriginalURL(), http.MethodGet)
+		if !ok {
+			return respond.NewStatusError(gofiber.StatusForbidden, "invalid or expired signature")
+		}
+
+		data, err := d.Get(ctx, p)
+		if err != nil {
+			if errors.Is(err, storage.ErrFileNotFound) {
+				return respond.NewStatusError(gofiber.StatusNotFound, "file not found")
+			}
+			return respond.NewStatusError(gofiber.StatusInternalServerError, "failed to read file", err)
+		}
+
+		contentType, err := d.ContentType(ctx, p)
+		if err != nil {
+			contentType = "application/octet-stream"
+		}
+		c.Set(gofiber.HeaderContentType, contentType)
+		return c.Send(data)
+	}
 }
 
 // serve runs fiberApp until it's told to shut down (SIGINT/SIGTERM), then

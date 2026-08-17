@@ -29,15 +29,20 @@ Requires Go 1.26.3+.
   backends in their own subpackage: [`cache/memory`](cache/memory) (in-process
   map) and [`cache/redis`](cache/redis) (real Redis, via
   [go-redis](https://github.com/redis/go-redis)).
+- [`storage`](storage) — a driver-agnostic `Disk` contract mirroring
+  Laravel's `Storage::disk()` (`Put`/`Get`, `Copy`/`Move`, `Url`/
+  `TemporaryUrl`/`PresignedPutUrl`, directory listing, ...), with backends
+  in their own subpackage: [`storage/local`](storage/local) (the local
+  filesystem, sandboxed via `os.Root`) and [`storage/s3`](storage/s3) (any
+  S3-compatible store, via the [MinIO Go SDK](https://github.com/minio/minio-go)).
 
 Each package is usable on its own; none of them import each other except
 where noted (the `respond` adapters depend on `respond`'s core, and the
-`cache` backends depend on `cache`'s core).
+`cache`/`storage` backends depend on their own package's core).
 
 ## Status
 
-Early — API may still shift before v1. `storage` (local/S3) is planned but
-not yet implemented, so it isn't part of this release.
+Early — API may still shift before v1.
 
 ## License
 

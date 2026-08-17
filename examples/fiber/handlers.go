@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"github.com/nanaaikinson/chandlery/examples/internal/task"
 	"github.com/nanaaikinson/chandlery/respond"
 	respondfiber "github.com/nanaaikinson/chandlery/respond/fiber"
+	"github.com/nanaaikinson/chandlery/storage"
 	validatorfiber "github.com/nanaaikinson/chandlery/validator/fiber"
 )
 
@@ -26,10 +28,11 @@ import (
 // in main and hanging methods off it (rather than closing over globals)
 // keeps each handler a plain, testable function of its own state.
 type handlers struct {
-	db    *bun.DB
-	repo  db.Repository[*task.Task]
-	cache cache.Store
-	ttl   time.Duration
+	db      *bun.DB
+	repo    db.Repository[*task.Task]
+	cache   cache.Store
+	ttl     time.Duration
+	storage storage.Disk
 }
 
 func (h *handlers) healthz(c gofiber.Ctx) error {
@@ -199,6 +202,13 @@ func (h *handlers) deleteTask(c gofiber.Ctx) error {
 
 	h.invalidateCache(ctx, task.CacheKey(id))
 
+	// Best-effort, logged rather than failing the request: the task row is
+	// already gone, and leaving an orphaned attachment behind is a smaller
+	// problem than reporting a successful delete as failed.
+	if err := h.storage.Delete(ctx, task.AttachmentKey(id)); err != nil {
+		slog.Warn("attachment cleanup failed", "id", id, "error", err)
+	}
+
 	return c.SendStatus(gofiber.StatusNoContent)
 }
 
@@ -211,4 +221,81 @@ func (h *handlers) invalidateCache(ctx context.Context, key string) {
 	if err := h.cache.Forget(ctx, key); err != nil {
 		slog.Warn("cache invalidation failed", "key", key, "error", err)
 	}
+}
+
+// attachmentTTL is how long an attachmentURL response's signed link stays
+// valid.
+const attachmentTTL = 15 * time.Minute
+
+func (h *handlers) uploadAttachment(c gofiber.Ctx) error {
+	ctx := c.Context()
+	id := c.Params("id")
+
+	exists, err := h.repo.Exists(ctx, func(q *bun.SelectQuery) *bun.SelectQuery {
+		return q.Where("id = ?", id)
+	})
+	if err != nil {
+		return respond.NewStatusError(gofiber.StatusInternalServerError, "failed to look up task", err)
+	}
+	if !exists {
+		return respond.NewStatusError(gofiber.StatusNotFound, "task not found")
+	}
+
+	if err := h.storage.Put(ctx, task.AttachmentKey(id), bytes.NewReader(c.Body())); err != nil {
+		return respond.NewStatusError(gofiber.StatusInternalServerError, "failed to store attachment", err)
+	}
+
+	return respondfiber.OK(c, "attachment uploaded")
+}
+
+func (h *handlers) downloadAttachment(c gofiber.Ctx) error {
+	ctx := c.Context()
+	key := task.AttachmentKey(c.Params("id"))
+
+	data, err := h.storage.Get(ctx, key)
+	if err != nil {
+		if errors.Is(err, storage.ErrFileNotFound) {
+			return respond.NewStatusError(gofiber.StatusNotFound, "no attachment for this task")
+		}
+		return respond.NewStatusError(gofiber.StatusInternalServerError, "failed to load attachment", err)
+	}
+
+	// Best-effort: an undetectable type still serves the bytes rather than
+	// failing a download that already succeeded.
+	contentType, err := h.storage.ContentType(ctx, key)
+	if err != nil {
+		contentType = "application/octet-stream"
+	}
+	c.Set(gofiber.HeaderContentType, contentType)
+	return c.Send(data)
+}
+
+func (h *handlers) deleteAttachment(c gofiber.Ctx) error {
+	if err := h.storage.Delete(c.Context(), task.AttachmentKey(c.Params("id"))); err != nil {
+		return respond.NewStatusError(gofiber.StatusInternalServerError, "failed to delete attachment", err)
+	}
+	return c.SendStatus(gofiber.StatusNoContent)
+}
+
+// attachmentURL hands back a time-limited link instead of streaming the
+// file through this handler: a real client downloads straight from S3 (or,
+// on the local driver, from this app's own /storage route — see main.go)
+// rather than doubling this process's bandwidth as a proxy.
+func (h *handlers) attachmentURL(c gofiber.Ctx) error {
+	ctx := c.Context()
+	key := task.AttachmentKey(c.Params("id"))
+
+	exists, err := h.storage.Exists(ctx, key)
+	if err != nil {
+		return respond.NewStatusError(gofiber.StatusInternalServerError, "failed to look up attachment", err)
+	}
+	if !exists {
+		return respond.NewStatusError(gofiber.StatusNotFound, "no attachment for this task")
+	}
+
+	url, err := h.storage.TemporaryUrl(ctx, key, attachmentTTL)
+	if err != nil {
+		return respond.NewStatusError(gofiber.StatusInternalServerError, "failed to sign url", err)
+	}
+	return respondfiber.Data(c, gofiber.StatusOK, task.AttachmentURL{URL: url, ExpiresInSeconds: int(attachmentTTL.Seconds())})
 }

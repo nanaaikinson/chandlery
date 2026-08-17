@@ -8,7 +8,9 @@ rule scopes it to `examples/...`, not this module's public API.
   `CreateSchema` (POST, full create), `PatchRequest`/`PatchSchema` (PATCH,
   true partial update via pointer fields), `List` (the paginated response
   shape), `NewCacheStore` (the `CACHE_DRIVER` switch between `cache/memory`
-  and `cache/redis`), and `CacheKey`.
+  and `cache/redis`), `CacheKey`, `NewStorageDisk` (the `STORAGE_DRIVER`
+  switch between `storage/local` and `storage/s3`), `AttachmentKey`, and
+  `AttachmentURL` (the signed-download-link response shape).
 - [`app`](app) — the rest: `ConfigureLogger` (text locally, JSON otherwise)
   and `ClampInt` (a query-param parse-and-clamp helper).
 
