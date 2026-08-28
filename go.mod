@@ -101,3 +101,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	mellium.im/sasl v0.3.2 // indirect
 )
+
+replace github.com/Oudwins/zog => github.com/nanaaikinson/zog v0.0.0-20260828124246-5ca95cb8a612
