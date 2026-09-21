@@ -2,6 +2,7 @@ package odm
 
 import (
 	"context"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
@@ -12,6 +13,11 @@ import (
 type Collection[T any] struct {
 	db         *DB
 	collection *mongo.Collection
+	meta       modelMeta
+	// now is DB's clock, copied here so query compilation can stamp a
+	// timestamp without reaching back through the database handle. Always
+	// set by Use.
+	now func() time.Time
 }
 
 // Use returns the collection for model T. The collection name comes from
@@ -25,7 +31,13 @@ func Use[T any](db *DB) *Collection[T] {
 	if db == nil {
 		panic("odm: Use: db is nil")
 	}
-	return &Collection[T]{db: db, collection: db.database.Collection(collectionName[T]())}
+	meta := metaFor[T]()
+	return &Collection[T]{
+		db:         db,
+		collection: db.database.Collection(meta.collection),
+		meta:       meta,
+		now:        db.now,
+	}
 }
 
 // Raw returns the underlying driver collection, for aggregations, bulk
@@ -39,13 +51,38 @@ func (c *Collection[T]) Raw() *mongo.Collection {
 // shorthand for it, and the terminal ones (Get, First, Find, Count, Exists)
 // run against the whole collection unfiltered.
 //
-// The mutating terminals — Update, UpdateOne, UpdateRaw, Delete, DeleteOne —
-// are deliberately not mirrored here. They act on every document the filter
-// matches, so emptying or rewriting a whole collection takes an explicit
-// users.Query().Delete(ctx) rather than a users.Delete(ctx) that reads like
-// it might delete one thing.
+// The mutating terminals — Update, UpdateOne, UpdateRaw, Delete, DeleteOne,
+// Restore and ForceDelete — are deliberately not mirrored here. They act on
+// every document the filter matches, so emptying or rewriting a whole
+// collection takes an explicit users.Query().Delete(ctx) rather than a
+// users.Delete(ctx) that reads like it might delete one thing. Create,
+// CreateMany and Save are mirrored, because each acts on models you handed
+// it rather than on whatever a filter reaches.
 func (c *Collection[T]) Query() *Query[T] {
 	return &Query[T]{collection: c}
+}
+
+// Scope starts a query with reusable transformations applied. See
+// Query.Scope.
+func (c *Collection[T]) Scope(scopes ...Scope[T]) *Query[T] {
+	return c.Query().Scope(scopes...)
+}
+
+// WithTrashed starts a query including soft-deleted documents. See
+// Query.WithTrashed.
+func (c *Collection[T]) WithTrashed() *Query[T] {
+	return c.Query().WithTrashed()
+}
+
+// OnlyTrashed starts a query over soft-deleted documents alone. See
+// Query.OnlyTrashed.
+func (c *Collection[T]) OnlyTrashed() *Query[T] {
+	return c.Query().OnlyTrashed()
+}
+
+// With starts a query that eager-loads relations. See Query.With.
+func (c *Collection[T]) With(relations ...Relation[T]) *Query[T] {
+	return c.Query().With(relations...)
 }
 
 // Where starts a query with an equality or comparison condition. See
@@ -147,15 +184,31 @@ func (c *Collection[T]) Count(ctx context.Context) (int64, error) {
 	return c.Query().Count(ctx)
 }
 
+// CursorPaginate pages through the whole collection. See
+// Query.CursorPaginate.
+func (c *Collection[T]) CursorPaginate(ctx context.Context, page CursorPagination) (CursorPage[T], error) {
+	return c.Query().CursorPaginate(ctx, page)
+}
+
 // Exists reports whether the collection holds anything. See Query.Exists.
 func (c *Collection[T]) Exists(ctx context.Context) (bool, error) {
 	return c.Query().Exists(ctx)
 }
 
 // Create inserts model. It takes a pointer so the fields it fills in are
-// visible to the caller afterwards: a model embedding odm.Model gets a ULID
-// _id (unless one is already set) and its CreatedAt/UpdatedAt stamped. A
-// model that doesn't embed odm.Model is inserted exactly as given.
+// visible to the caller afterwards: a model embedding odm.Model or
+// odm.IdentityModel gets a ULID _id (unless one is already set), and
+// odm.Model also gets its CreatedAt/UpdatedAt stamped. A model that embeds
+// neither is inserted exactly as given.
+//
+// The order is BeforeCreate, the Creating observers, then those
+// assignments, then the insert, then AfterCreate and the Created observers —
+// so a hook that sets its own ID or CreatedAt wins, and anything failing
+// before the insert stops it. An error from the two that run afterwards is
+// returned as-is, but the document is already written by then.
+//
+// A successful insert also leaves the model knowing it exists, so a later
+// Save updates it rather than inserting it twice.
 //
 // It reports only an error. Mongo's own generated _id for a model with no
 // _id field of its own is therefore not handed back — embed odm.Model, set
@@ -165,10 +218,34 @@ func (c *Collection[T]) Create(ctx context.Context, model *T) error {
 		return ErrNilModel
 	}
 
-	if hook, ok := any(model).(inserter); ok {
-		hook.prepareForInsert(c.db.now())
+	return c.insert(ctx, model)
+}
+
+// insert is Create's body, shared with Save's insert path.
+func (c *Collection[T]) insert(ctx context.Context, model *T) error {
+	if err := runBeforeCreate(ctx, model); err != nil {
+		return err
+	}
+	if err := notify(ctx, c.db, eventCreating, model); err != nil {
+		return err
 	}
 
-	_, err := c.collection.InsertOne(ctx, model)
-	return err
+	if hook, ok := any(model).(inserter); ok {
+		hook.prepareForInsert(c.now())
+	}
+
+	if _, err := c.collection.InsertOne(ctx, model); err != nil {
+		return classify(err)
+	}
+
+	// The model now agrees with the database, so a later Save sees an
+	// update with nothing changed rather than a second insert.
+	if err := snapshot(model); err != nil {
+		return err
+	}
+
+	if err := runAfterCreate(ctx, model); err != nil {
+		return err
+	}
+	return notify(ctx, c.db, eventCreated, model)
 }

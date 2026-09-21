@@ -6,16 +6,21 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
+
+// testNow is the instant every unit test's clock reports, so a compiled
+// timestamp is something a test can assert on exactly.
+var testNow = time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 
 // testCollection is a Collection with no Mongo behind it. Every builder
 // method, and every terminal method's early error return, works without
 // touching the server — which is the whole point of testing query state
 // separately from the integration suite.
 func testCollection() *Collection[User] {
-	return &Collection[User]{}
+	return &Collection[User]{meta: metaFor[User](), now: func() time.Time { return testNow }}
 }
 
 func TestWhere(t *testing.T) {

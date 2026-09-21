@@ -1,10 +1,13 @@
 # examples
 
-Two runnable programs, same task API, same set of chandlery packages — one
-per HTTP framework this repo has an adapter for:
+Runnable programs. The first two are the same task API over the same set of
+chandlery packages, one per HTTP framework this repo has an adapter for:
 
 - [`fiber`](fiber) — built on [Fiber v3](https://github.com/gofiber/fiber).
 - [`nethttp`](nethttp) — built on the standard library's `net/http`.
+- [`odm`](odm) — a console walk through the [`odm`](../odm) package against a
+  real MongoDB. Not an HTTP service: `odm` has nothing to do with HTTP, so
+  neither does its example.
 - [`internal`](internal) — the domain code both of the above share
   unchanged: `internal/task` (the `Task` model, its create/patch request
   and validation schemas, the paginated list shape, the cache and storage

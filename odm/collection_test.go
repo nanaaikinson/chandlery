@@ -31,46 +31,46 @@ func TestCollectionName(t *testing.T) {
 
 	t.Run("uses CollectionName with a value receiver", func(t *testing.T) {
 		t.Parallel()
-		if got := collectionName[namedByValue](); got != "explicitly_named" {
+		if got := metaFor[namedByValue]().collection; got != "explicitly_named" {
 			t.Errorf("collectionName() = %q, want %q", got, "explicitly_named")
 		}
 	})
 
 	t.Run("uses CollectionName with a pointer receiver", func(t *testing.T) {
 		t.Parallel()
-		if got := collectionName[namedByPointer](); got != "pointer_named" {
+		if got := metaFor[namedByPointer]().collection; got != "pointer_named" {
 			t.Errorf("collectionName() = %q, want %q", got, "pointer_named")
 		}
 	})
 
 	t.Run("falls back to the lowercased type name plus s", func(t *testing.T) {
 		t.Parallel()
-		if got := collectionName[User](); got != "users" {
+		if got := metaFor[User]().collection; got != "users" {
 			t.Errorf("collectionName() = %q, want %q", got, "users")
 		}
 	})
 
 	t.Run("returns the same name when resolved again from cache", func(t *testing.T) {
 		t.Parallel()
-		first := collectionName[User]()
-		if second := collectionName[User](); second != first {
+		first := metaFor[User]().collection
+		if second := metaFor[User]().collection; second != first {
 			t.Errorf("collectionName() = %q on the second call, want %q", second, first)
 		}
 	})
 
 	t.Run("panics on a pointer model type", func(t *testing.T) {
 		t.Parallel()
-		assertPanics(t, "not a pointer", func() { collectionName[*User]() })
+		assertPanics(t, "not a pointer", func() { _ = metaFor[*User]().collection })
 	})
 
 	t.Run("panics on a non-struct model type with no CollectionName", func(t *testing.T) {
 		t.Parallel()
-		assertPanics(t, "must be a struct", func() { collectionName[int]() })
+		assertPanics(t, "must be a struct", func() { _ = metaFor[int]().collection })
 	})
 
 	t.Run("panics on an anonymous struct", func(t *testing.T) {
 		t.Parallel()
-		assertPanics(t, "anonymous struct", func() { collectionName[struct{ Name string }]() })
+		assertPanics(t, "anonymous struct", func() { _ = metaFor[struct{ Name string }]().collection })
 	})
 }
 

@@ -161,10 +161,13 @@ func TestSortedUpdateOne(t *testing.T) {
 				// Setting a field to the value it already holds matches but
 				// changes nothing. MongoDB 8.0 reports that exactly;
 				// findAndModify can't, so the fallback mirrors MatchedCount.
+				// WithoutTimestamps keeps it a true no-op — the automatic
+				// updated_at would otherwise be a real change.
 				result, err := users.
 					Where("status", "pending").
 					OrderBy("name", odm.Asc).
 					Set("status", "pending").
+					WithoutTimestamps().
 					UpdateOne(ctx)
 				if err != nil {
 					t.Fatalf("UpdateOne() error = %v", err)
@@ -192,6 +195,7 @@ func TestSortedUpdateOne(t *testing.T) {
 				result, err := users.
 					Where("status", "pending").
 					Set("status", "pending").
+					WithoutTimestamps().
 					UpdateOne(ctx)
 				if err != nil {
 					t.Fatalf("UpdateOne() error = %v", err)

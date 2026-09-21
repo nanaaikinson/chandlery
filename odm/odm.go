@@ -1,13 +1,7 @@
-// Package odm is a small MongoDB object-document mapper: a generic,
-// copy-on-write query builder (odm.Query[T]) over a typed collection
-// (odm.Collection[T]), shaped after Laravel Eloquent's developer experience
-// but staying native MongoDB underneath. Filters are plain bson, sorts are
-// plain bson, and every layer hands back the driver's own type — DB.Raw,
-// Collection.Raw, Query.WhereRaw — so nothing here can trap a caller who
-// needs something the builder doesn't cover.
-//
-// It is deliberately separate from this repo's db package: the two share no
-// types and never import each other.
+// Package odm is a MongoDB object-document mapper: a generic, copy-on-write
+// query builder (odm.Query[T]) over a typed collection (odm.Collection[T]),
+// shaped after Laravel Eloquent's developer experience but staying native
+// MongoDB underneath.
 //
 //	database := odm.New(client.Database("app"))
 //	users := odm.Use[User](database)
@@ -16,9 +10,39 @@
 //		Where("email", "nana@example.com").
 //		Where("is_active", true).
 //		First(ctx)
+//
+// Filters are plain bson, sorts are plain bson, updates compile to MongoDB's
+// own operators, and every layer hands back the driver's own type — DB.Raw,
+// Collection.Raw, Query.WhereRaw, Query.UpdateRaw, Query.Aggregate — so
+// nothing here can trap a caller who needs something the builder doesn't
+// cover.
+//
+// Beyond querying, a model can opt into behavior by embedding:
+//
+//   - odm.IdentityModel gives a ULID _id, and odm.Model adds
+//     created_at/updated_at that Create stamps and Update refreshes.
+//   - odm.SoftDeletes turns Delete into a deleted_at stamp that later reads
+//     skip, with WithTrashed, OnlyTrashed, Restore and ForceDelete to reach
+//     past it.
+//
+// A model that embeds one of the first two also remembers the document it
+// came from, which is what Save diffs against to write only what changed.
+// BeforeCreate, AfterCreate, BeforeUpdate and AfterUpdate hook the model's
+// own lifecycle; Observe registers the same events outside the model type.
+//
+// Relations (odm.HasMany, odm.HasOne, odm.BelongsTo) are declared explicitly
+// and loaded by Query.With, batched into one query each. Query.CursorPaginate
+// pages by seeking rather than skipping. DB.Transaction runs a callback
+// inside a MongoDB transaction, and Collection.SyncIndexes creates whatever
+// a model declares through odm.Indexer.
+//
+// It is deliberately separate from this repo's db package: the two share no
+// types and never import each other.
 package odm
 
 import (
+	"reflect"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -34,6 +58,11 @@ type DB struct {
 	// capabilities is probed lazily, on the first operation whose shape
 	// depends on the server's version. See supportsSortedUpdateOne.
 	capabilities serverCapabilities
+
+	// observers are registered per database rather than per process, so
+	// nothing here is package-global mutable state. See Observe.
+	observerMu sync.RWMutex
+	observers  map[reflect.Type][]any
 }
 
 // Option configures a DB.

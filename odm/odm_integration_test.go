@@ -63,13 +63,22 @@ func newUsers(t *testing.T, opts ...odm.Option) *odm.Collection[user] {
 func newUsersOn(t *testing.T, on *mongo.Client, opts ...odm.Option) *odm.Collection[user] {
 	t.Helper()
 
+	return odm.Use[user](odm.New(testDatabase(t, on), opts...))
+}
+
+// testDatabase gives the calling test its own database, dropped afterwards.
+// Handed out raw so a test can wrap it in more than one odm.DB — two clocks
+// over one collection, say.
+func testDatabase(t *testing.T, on *mongo.Client) *mongo.Database {
+	t.Helper()
+
 	database := on.Database(databaseName(t))
 	t.Cleanup(func() {
 		if err := database.Drop(context.Background()); err != nil {
 			t.Errorf("dropping test database: %v", err)
 		}
 	})
-	return odm.Use[user](odm.New(database, opts...))
+	return database
 }
 
 // databaseName turns a test's name into a legal Mongo database name: the

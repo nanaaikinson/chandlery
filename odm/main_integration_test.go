@@ -11,6 +11,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/testcontainers/testcontainers-go"
 	tcmongo "github.com/testcontainers/testcontainers-go/modules/mongodb"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -31,6 +32,10 @@ var client *mongo.Client
 // chosen.
 var legacyClient *mongo.Client
 
+// primaryURI is the replica set's connection string, for the one test that
+// needs a client of its own — a command monitor counting queries.
+var primaryURI string
+
 func TestMain(m *testing.M) {
 	os.Exit(run(m))
 }
@@ -38,15 +43,19 @@ func TestMain(m *testing.M) {
 func run(m *testing.M) int {
 	ctx := context.Background()
 
-	primary, cleanup, err := start(ctx, "mongo:8")
+	// A replica set, not a standalone: MongoDB only allows transactions
+	// there, and it is closer to what anything using this package runs
+	// against anyway.
+	primary, uri, cleanup, err := start(ctx, "mongo:8", tcmongo.WithReplicaSet("rs0"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "starting mongodb 8:", err)
 		return 1
 	}
 	defer cleanup()
 	client = primary
+	primaryURI = uri
 
-	legacy, cleanupLegacy, err := start(ctx, "mongo:7")
+	legacy, _, cleanupLegacy, err := start(ctx, "mongo:7")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "starting mongodb 7:", err)
 		return 1
@@ -58,22 +67,22 @@ func run(m *testing.M) int {
 }
 
 // start brings up one MongoDB container and returns a connected client.
-func start(ctx context.Context, image string) (*mongo.Client, func(), error) {
-	container, err := tcmongo.Run(ctx, image)
+func start(ctx context.Context, image string, opts ...testcontainers.ContainerCustomizer) (*mongo.Client, string, func(), error) {
+	container, err := tcmongo.Run(ctx, image, opts...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("starting container: %w", err)
+		return nil, "", nil, fmt.Errorf("starting container: %w", err)
 	}
 
 	connStr, err := container.ConnectionString(ctx)
 	if err != nil {
 		container.Terminate(ctx)
-		return nil, nil, fmt.Errorf("getting connection string: %w", err)
+		return nil, "", nil, fmt.Errorf("getting connection string: %w", err)
 	}
 
 	connected, err := mongo.Connect(options.Client().ApplyURI(connStr))
 	if err != nil {
 		container.Terminate(ctx)
-		return nil, nil, fmt.Errorf("connecting: %w", err)
+		return nil, "", nil, fmt.Errorf("connecting: %w", err)
 	}
 
 	// Connect doesn't dial, so without this a server that isn't ready yet
@@ -81,10 +90,10 @@ func start(ctx context.Context, image string) (*mongo.Client, func(), error) {
 	if err := connected.Ping(ctx, readpref.Primary()); err != nil {
 		connected.Disconnect(ctx)
 		container.Terminate(ctx)
-		return nil, nil, fmt.Errorf("pinging: %w", err)
+		return nil, "", nil, fmt.Errorf("pinging: %w", err)
 	}
 
-	return connected, func() {
+	return connected, connStr, func() {
 		connected.Disconnect(ctx)
 		container.Terminate(ctx)
 	}, nil

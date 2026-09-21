@@ -47,25 +47,68 @@ func (q *Query[T]) findOneOptions() *options.FindOneOptionsBuilder {
 
 // Get runs the query and decodes every match. The returned slice is empty
 // (and may be nil) when nothing matches — that is not an error. Fields left
-// out by Select/Exclude decode as their zero value.
+// out by Select/Exclude decode as their zero value, and any relation named
+// by With is loaded onto the results before they are returned.
 func (q *Query[T]) Get(ctx context.Context) ([]T, error) {
+	models, raws, err := q.fetch(ctx, len(q.with) > 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := q.loadRelations(ctx, models, raws); err != nil {
+		return nil, err
+	}
+	return models, nil
+}
+
+// fetch runs the query, optionally keeping each document's raw bytes
+// alongside the decoded model. The raw bytes are what relation loading and
+// cursor pagination read their key values from: the field they need is named
+// by a string and may not be a field of T at all, so going back to the bytes
+// is both exact and free of reflection.
+func (q *Query[T]) fetch(ctx context.Context, keepRaw bool) ([]T, []bson.Raw, error) {
 	if q.err != nil {
-		return nil, q.err
+		return nil, nil, q.err
 	}
 
 	cursor, err := q.collection.collection.Find(ctx, q.filter(), q.findOptions())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Cursor.All drains the cursor, closes it even on failure, and reports
-	// both iteration and decode errors — so nothing here is swallowed and
-	// no cursor is left open.
-	var models []T
-	if err := cursor.All(ctx, &models); err != nil {
-		return nil, err
+	if !keepRaw {
+		// Cursor.All drains the cursor, closes it even on failure, and
+		// reports both iteration and decode errors — so nothing here is
+		// swallowed and no cursor is left open.
+		var models []T
+		if err := cursor.All(ctx, &models); err != nil {
+			return nil, nil, err
+		}
+		if err := snapshotAll(models, q.collection.meta.trackable); err != nil {
+			return nil, nil, err
+		}
+		return models, nil, nil
 	}
-	return models, nil
+	defer cursor.Close(ctx)
+
+	var models []T
+	var raws []bson.Raw
+	for cursor.Next(ctx) {
+		var model T
+		if err := cursor.Decode(&model); err != nil {
+			return nil, nil, err
+		}
+		models = append(models, model)
+		// Cursor.Current is reused between iterations, so each document's
+		// bytes have to be copied out.
+		raws = append(raws, bson.Raw(append([]byte(nil), cursor.Current...)))
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, nil, err
+	}
+	if err := snapshotAll(models, q.collection.meta.trackable); err != nil {
+		return nil, nil, err
+	}
+	return models, raws, nil
 }
 
 // First returns the first matching document, honouring OrderBy, Skip and any
@@ -78,14 +121,27 @@ func (q *Query[T]) First(ctx context.Context) (T, error) {
 		return model, q.err
 	}
 
-	err := q.collection.collection.FindOne(ctx, q.filter(), q.findOneOptions()).Decode(&model)
+	raw, err := q.collection.collection.FindOne(ctx, q.filter(), q.findOneOptions()).Raw()
 	switch {
 	case errors.Is(err, mongo.ErrNoDocuments):
 		return model, fmt.Errorf("%w: %w", ErrModelNotFound, err)
 	case err != nil:
 		return model, err
 	}
-	return model, nil
+	if err := bson.Unmarshal(raw, &model); err != nil {
+		return model, err
+	}
+
+	// One model is still one batch: a relation costs one query, not one per
+	// parent, whether there is a page of them or a single document.
+	models := []T{model}
+	if err := snapshotAll(models, q.collection.meta.trackable); err != nil {
+		return model, err
+	}
+	if err := q.loadRelations(ctx, models, []bson.Raw{raw}); err != nil {
+		return model, err
+	}
+	return models[0], nil
 }
 
 // Find returns the document whose _id is id, subject to any conditions
@@ -137,7 +193,8 @@ func (q *Query[T]) Update(ctx context.Context) (*mongo.UpdateResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	return q.collection.collection.UpdateMany(ctx, q.filter(), update)
+	result, err := q.collection.collection.UpdateMany(ctx, q.filter(), update)
+	return result, classify(err)
 }
 
 // UpdateOne is Update against at most one matching document, honouring
@@ -171,10 +228,12 @@ func (q *Query[T]) UpdateOne(ctx context.Context) (*mongo.UpdateResult, error) {
 func (q *Query[T]) updateOne(ctx context.Context, update any) (*mongo.UpdateResult, error) {
 	collection := q.collection.collection
 	if len(q.sorts) == 0 {
-		return collection.UpdateOne(ctx, q.filter(), update)
+		result, err := collection.UpdateOne(ctx, q.filter(), update)
+		return result, classify(err)
 	}
 	if q.collection.db.supportsSortedUpdateOne(ctx) {
-		return collection.UpdateOne(ctx, q.filter(), update, options.UpdateOne().SetSort(q.sorts))
+		result, err := collection.UpdateOne(ctx, q.filter(), update, options.UpdateOne().SetSort(q.sorts))
+		return result, classify(err)
 	}
 
 	// The document itself is discarded, so ask for the smallest one the
@@ -187,7 +246,7 @@ func (q *Query[T]) updateOne(ctx context.Context, update any) (*mongo.UpdateResu
 	case errors.Is(err, mongo.ErrNoDocuments):
 		return &mongo.UpdateResult{}, nil
 	case err != nil:
-		return nil, err
+		return nil, classify(err)
 	}
 	return &mongo.UpdateResult{MatchedCount: 1, ModifiedCount: 1}, nil
 }
@@ -201,7 +260,24 @@ func (q *Query[T]) stagedUpdate(call string) (bson.D, error) {
 	if len(q.updates) == 0 {
 		return nil, fmt.Errorf("%w: %s: no update operators staged — call Set/Unset/Inc/Push/Pull/AddToSet, or use UpdateRaw", ErrInvalidQuery, call)
 	}
-	return compileUpdate(q.updates), nil
+	return compileUpdate(q.timestampedOps(q.updates)), nil
+}
+
+// timestampedOps adds the automatic updated_at refresh to a staged update.
+// It stays out of the way when the model has no timestamps, when the caller
+// asked for none via WithoutTimestamps, or when the update already writes
+// updated_at itself — that last case both respects an explicit value and
+// avoids the duplicate-field conflict MongoDB would reject.
+func (q *Query[T]) timestampedOps(ops []updateOp) []updateOp {
+	if !q.collection.meta.timestamps || q.skipTimestamps {
+		return ops
+	}
+	for _, op := range ops {
+		if op.field == updatedAtField {
+			return ops
+		}
+	}
+	return cloneAppend(ops, updateOp{operator: "$set", field: updatedAtField, value: q.collection.now()})
 }
 
 // UpdateRaw applies a driver-native update document to every matching
@@ -227,24 +303,43 @@ func (q *Query[T]) UpdateRaw(ctx context.Context, update any) (*mongo.UpdateResu
 	if len(q.updates) > 0 {
 		return nil, fmt.Errorf("%w: UpdateRaw: the query already stages %d operator(s) via Set/Inc/... — use Update, or build the whole update raw", ErrInvalidQuery, len(q.updates))
 	}
-	return q.collection.collection.UpdateMany(ctx, q.filter(), update)
+	result, err := q.collection.collection.UpdateMany(ctx, q.filter(), update)
+	return result, classify(err)
 }
 
-// Delete permanently removes *every* document matching the filter. This is a
-// physical MongoDB delete: there are no soft deletes in this package, so
-// nothing is recoverable afterwards.
+// Delete removes *every* document matching the filter.
 //
-// An unfiltered query deletes the whole collection, which is why Delete
-// lives on Query and not on Collection — clearing everything takes an
-// explicit users.Query().Delete(ctx).
+// On a model embedding odm.SoftDeletes it stamps deleted_at instead of
+// removing anything, which hides the documents from later queries until
+// Restore clears the stamp; ForceDelete is the physical delete there. On
+// every other model it is a physical MongoDB delete, and nothing is
+// recoverable afterwards.
+//
+// DeletedCount counts the documents the call removed from view either way —
+// on the soft-delete path it is the underlying update's ModifiedCount, so an
+// already-trashed document (which the default scope excludes anyway) doesn't
+// count twice.
+//
+// An unfiltered query hits the whole collection, which is why Delete lives
+// on Query and not on Collection — clearing everything takes an explicit
+// users.Query().Delete(ctx).
 func (q *Query[T]) Delete(ctx context.Context) (*mongo.DeleteResult, error) {
 	if q.err != nil {
 		return nil, q.err
 	}
-	return q.collection.collection.DeleteMany(ctx, q.filter())
+	if !q.collection.meta.softDeletes {
+		return q.collection.collection.DeleteMany(ctx, q.filter())
+	}
+
+	result, err := q.collection.collection.UpdateMany(ctx, q.filter(), q.softDeleteUpdate())
+	if err != nil {
+		return nil, classify(err)
+	}
+	return &mongo.DeleteResult{DeletedCount: result.ModifiedCount}, nil
 }
 
-// DeleteOne permanently removes at most one matching document, honouring
+// DeleteOne removes at most one matching document, soft-deleting it on a
+// model that embeds odm.SoftDeletes exactly as Delete does, and honouring
 // OrderBy to choose which one. The driver's deleteOne carries no sort option
 // on any server version, so a sorted DeleteOne always goes through
 // findAndModify; an unsorted one is a plain deleteOne. Both are atomic, and
@@ -252,6 +347,15 @@ func (q *Query[T]) Delete(ctx context.Context) (*mongo.DeleteResult, error) {
 func (q *Query[T]) DeleteOne(ctx context.Context) (*mongo.DeleteResult, error) {
 	if q.err != nil {
 		return nil, q.err
+	}
+	if q.collection.meta.softDeletes {
+		// updateOne carries the same sort handling a physical DeleteOne
+		// gets below, so the soft path picks its document the same way.
+		result, err := q.updateOne(ctx, q.softDeleteUpdate())
+		if err != nil {
+			return nil, err
+		}
+		return &mongo.DeleteResult{DeletedCount: result.ModifiedCount}, nil
 	}
 	if len(q.sorts) == 0 {
 		return q.collection.collection.DeleteOne(ctx, q.filter())

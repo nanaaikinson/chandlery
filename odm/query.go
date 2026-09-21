@@ -43,8 +43,9 @@ const (
 // goroutines — nothing mutates one after it is built.
 //
 // A Query holds no cursor or connection, and is only sent to the server by a
-// terminal method (Get, First, Find, Count, Exists, Update, UpdateOne,
-// UpdateRaw, Delete, DeleteOne).
+// terminal method: Get, First, Find, Count, Exists, CursorPaginate and
+// Aggregate to read; Update, UpdateOne, UpdateRaw, Delete, DeleteOne,
+// Restore and ForceDelete to write.
 type Query[T any] struct {
 	collection *Collection[T]
 
@@ -59,6 +60,14 @@ type Query[T any] struct {
 	projectionMode projectionMode
 
 	updates []updateOp
+	with    []Relation[T]
+
+	// trashed is how this query treats soft-deleted documents, applied at
+	// compile time so WithTrashed overrides the default whatever order the
+	// chain is written in. Meaningless on a model without odm.SoftDeletes.
+	trashed trashedMode
+	// skipTimestamps suppresses the automatic updated_at refresh.
+	skipTimestamps bool
 
 	// err records the first invalid builder call, surfaced by whichever
 	// terminal method runs next. See ErrInvalidQuery.
@@ -96,9 +105,35 @@ func (q *Query[T]) withError(err error) *Query[T] {
 	return &next
 }
 
-// filter renders the accumulated conditions as one filter document.
+// filter renders the accumulated conditions as one filter document, under
+// the query's own soft-delete scope.
 func (q *Query[T]) filter() any {
-	return buildFilter(q.filters)
+	return q.compileFilter(q.trashed)
+}
+
+// compileFilter renders the conditions under a given soft-delete mode, which
+// Restore and ForceDelete override. The scope is added here rather than when
+// the query is built so that it lands exactly once, last, however the chain
+// was written — and never at all for a model that doesn't soft-delete.
+func (q *Query[T]) compileFilter(mode trashedMode) any {
+	if !q.collection.meta.softDeletes {
+		return buildFilter(q.filters)
+	}
+
+	scope := softDeleteFilter(mode)
+	if scope == nil {
+		return buildFilter(q.filters)
+	}
+	return buildFilter(cloneAppend(q.filters, any(scope)))
+}
+
+// WithoutTimestamps stops this query refreshing updated_at, for a write that
+// shouldn't count as user-visible activity (a backfill, a counter bump). It
+// does nothing on a model without odm.Model's timestamps.
+func (q *Query[T]) WithoutTimestamps() *Query[T] {
+	next := *q
+	next.skipTimestamps = true
+	return &next
 }
 
 // Where adds a condition on field, in either of two shapes:

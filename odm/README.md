@@ -12,6 +12,13 @@ something the builder doesn't cover.
 This package is independent of [`db`](../db): the two share no types and
 neither imports the other.
 
+```
+go get github.com/nanaaikinson/chandlery
+```
+
+Requires Go 1.26.3+ and
+[mongo-driver/v2](https://go.mongodb.org/mongo-driver/v2).
+
 ## A model
 
 ```go
@@ -30,8 +37,14 @@ func (User) CollectionName() string {
 
 `odm.Model` is optional. Embed it (inline, so its fields land at the top
 level of the document) for a ULID `_id` plus `created_at`/`updated_at` that
-`Create` fills in. A struct with its own `bson:"_id"` — or none at all,
-letting Mongo generate an ObjectID — works everywhere else in the package.
+`Create` stamps and `Update` refreshes. Two alternatives:
+
+- `odm.IdentityModel` — the ULID `_id` alone, for a collection with no
+  timestamps.
+- neither — a struct with its own `bson:"_id"`, or none at all, letting
+  MongoDB generate an ObjectID.
+
+Embedding `odm.SoftDeletes` alongside opts the model into soft deletion.
 
 `CollectionName` is also optional. Without it the collection name is the
 lowercased type name plus `"s"` (`User` → `users`). That is the whole of the
@@ -86,6 +99,9 @@ err := users.Create(ctx, &user)
 | `WhereBetween(field, from, to)`   | Inclusive `$gte`/`$lte`.                                                                                        |
 | `WhereNotBetween(field, from, to)` | `$or` of `$lt`/`$gt`; needs the field to exist.                                                                |
 | `WhereRaw(filter)`                | A driver-native BSON document (`bson.M`, `bson.D`, `bson.Raw`, or a tagged struct), ANDed with everything else. |
+| `Scope(scopes...)`                | Applies reusable query transformations.                                                                         |
+| `With(relations...)`              | Eager-loads relations, one extra query each.                                                                     |
+| `WithTrashed()` / `OnlyTrashed()` | Soft-delete models only — see below.                                                                            |
 | `Select(fields...)`               | Inclusion projection.                                                                                           |
 | `Exclude(fields...)`              | Exclusion projection.                                                                                           |
 | `OrderBy(field, direction)`       | `odm.Asc` / `odm.Desc`. Repeated calls break earlier ties.                                                      |
@@ -97,7 +113,13 @@ err := users.Create(ctx, &user)
 | `Find(ctx, id)`                   | By `_id`, of whatever type your model uses.                                                                     |
 | `Count(ctx)`                      | `(int64, error)`. Ignores `Limit`/`Skip` — the real total.                                                       |
 | `Exists(ctx)`                     | `(bool, error)`. Stops at the first match; decodes nothing.                                                      |
+| `CursorPaginate(ctx, opts)`       | One seek-based page → `CursorPage[T]`.                                                                           |
+| `Aggregate(ctx, pipeline)`        | A native `mongo.Pipeline`, decoded into `T`.                                                                     |
 | `Create(ctx, &model)`             | On the collection, not the query.                                                                               |
+| `CreateMany(ctx, models)`         | On the collection. One insert, same preparation per model.                                                       |
+| `Save(ctx, &model)`               | On the collection. Inserts a new model, updates a changed one.                                                    |
+| `BulkWrite(ctx, models)`          | On the collection. Native `[]mongo.WriteModel`, passed straight through.                                          |
+| `SyncIndexes(ctx)`                | On the collection. Creates what the model declares.                                                              |
 
 Every one of these can also start a chain directly from the collection
 (`users.Where(...)`, `users.Get(ctx)`, ...).
@@ -117,8 +139,11 @@ Every one of these can also start a chain directly from the collection
 | `Update(ctx)`              | `UpdateMany` of the staged operators → `*mongo.UpdateResult`.       |
 | `UpdateOne(ctx)`           | Same, against one document — `OrderBy` picks which.                 |
 | `UpdateRaw(ctx, update)`   | A native update document (or pipeline), `UpdateMany` semantics.     |
-| `Delete(ctx)`              | `DeleteMany` → `*mongo.DeleteResult`. **Physical delete.**          |
-| `DeleteOne(ctx)`           | Same, against one document — `OrderBy` picks which.                 |
+| `WithoutTimestamps()`      | Suppresses the automatic `updated_at` refresh.                       |
+| `Delete(ctx)`              | `DeleteMany` → `*mongo.DeleteResult`, or a soft delete — see below.  |
+| `DeleteOne(ctx)`           | Same, against one document — `OrderBy` picks which.                  |
+| `Restore(ctx)`             | Soft-delete models only. Clears `deleted_at`.                        |
+| `ForceDelete(ctx)`         | Soft-delete models only. **Physical delete.**                        |
 
 These live on `Query`, not on `Collection`: they act on every document the
 filter matches, so rewriting or emptying a whole collection takes an
@@ -244,6 +269,202 @@ both counts are the server's own. `DeleteOne` has no such caveat:
 `deleteOne` takes no sort on any version, so a sorted one always uses
 `findAndModify`, and `DeletedCount` is exact either way.
 
+### Pagination
+
+Cursor pagination seeks straight to a page instead of counting past the ones
+before it, which is what makes it stay fast deep into a collection:
+
+```go
+page, err := users.
+	Where("business_id", businessID).
+	OrderBy("created_at", odm.Desc).
+	CursorPaginate(ctx, odm.CursorPagination{Limit: 20, Cursor: cursor})
+
+page.Data        // []User
+page.NextCursor  // hand back as Cursor for the next page
+page.HasMore     // whether there is one
+```
+
+`_id` is appended to the sort as a tie-breaker unless it is already there.
+That is not a detail: documents sharing a `created_at` have no order between
+them, and a cursor built on `created_at` alone silently skips and reorders
+rows across page boundaries. An unsorted query paginates by `_id` ascending.
+
+The cursor is opaque — base64 of a small BSON document holding the sort it
+was minted under and the last row's sort values. Handing one to a query that
+sorts differently returns `odm.ErrInvalidCursor` rather than nonsense, as
+does a stale or hand-edited one, so a cursor arriving from a URL needs one
+error branch.
+
+The query's own `Limit` and `Skip` are ignored — the page size is
+`CursorPagination.Limit`, and seeking is what replaces skipping. Filters,
+projection and the soft-delete scope all apply as usual, but a projection
+has to keep every field the sort uses, since the next cursor is read out of
+the documents that come back.
+
+### Aggregation
+
+```go
+type RevenueByDay struct {
+	Day   string  `bson:"_id"`
+	Total float64 `bson:"total"`
+}
+
+rows, err := odm.AggregateInto[Order, RevenueByDay](ctx, orders.Where("status", "paid"), pipeline)
+```
+
+The pipeline is the driver's own `mongo.Pipeline`, passed through untouched.
+`Query.Aggregate` decodes into the model; `AggregateInto` decodes into
+anything else, which is the usual case for a `$group`. It is a function
+rather than a method because a method cannot introduce a type parameter.
+
+The query's filter is prepended as a `$match`, so an aggregation is scoped
+the same way every other read on that query is, soft deletes included. The
+cost is that this package's `$match` is the first stage the server sees, so a
+pipeline that must open with `$geoNear`, `$changeStream` or `$indexStats`
+needs `Raw().Aggregate`, which prepends nothing and scopes nothing.
+
+### Bulk writes
+
+```go
+result, err := users.BulkWrite(ctx, []mongo.WriteModel{
+	mongo.NewUpdateOneModel().SetFilter(...).SetUpdate(...),
+	mongo.NewDeleteOneModel().SetFilter(...),
+})
+```
+
+Nothing is rewritten on the way through: no soft-delete scope, no timestamp,
+no hook. A bulk write is a batch of instructions you composed, and
+second-guessing them is how a bulk API stops being usable for what bulk APIs
+are for.
+
+`CreateMany` is the one convenience on top — one round trip, with the same
+preparation `Create` gives a single model (hooks, ULID, timestamps), every
+model prepared before anything is sent:
+
+```go
+err := users.CreateMany(ctx, []*User{{Name: "Nana"}, {Name: "Kwesi"}})
+```
+
+It is MongoDB's `InsertMany`, not a transaction: by default it stops at the
+first failing document and the ones before it stay written.
+
+### Timestamps
+
+A model embedding `odm.Model` gets `created_at`/`updated_at` handled for it:
+`Create` stamps both, and `Update`/`UpdateOne` refresh `updated_at`.
+
+```go
+users.Where("_id", id).Set("name", "Nana").Update(ctx)
+// $set: { name: "Nana", updated_at: <now> }
+```
+
+The stamp steps aside when you write the field yourself
+(`Set("updated_at", t)`), and `WithoutTimestamps()` turns it off for one
+query — a backfill, or a counter bump that shouldn't count as activity.
+`UpdateRaw` never stamps anything; a raw update is entirely yours.
+
+The clock is injectable, so a test can assert on a fixed instant rather than
+on "roughly now":
+
+```go
+database := odm.New(client.Database("app"), odm.WithClock(func() time.Time {
+	return fixed
+}))
+```
+
+### Scopes
+
+A scope is a named query transformation kept next to the model:
+
+```go
+func Active(q *odm.Query[User]) *odm.Query[User] {
+	return q.Where("is_active", true)
+}
+
+users.Scope(Active, Verified).Where("country", "GH").Get(ctx)
+```
+
+It is an ordinary function over an immutable query, which is all it needs to
+be: no context and no error return, so it cannot perform I/O, and it cannot
+mutate what it was handed.
+
+### Hooks
+
+Implement either interface on the pointer receiver:
+
+```go
+func (u *User) BeforeCreate(ctx context.Context) error {
+	u.Email = strings.ToLower(strings.TrimSpace(u.Email))
+	return nil
+}
+```
+
+| Hook           | When                                                            |
+| -------------- | --------------------------------------------------------------- |
+| `BeforeCreate` | Before an insert (`Create`, `CreateMany`, or `Save` on a new model). An error aborts it. |
+| `AfterCreate`  | After the insert succeeds. An error reaches the caller, but the document is already written — this cannot undo it. |
+| `BeforeUpdate` | Before `Save` writes a changed model. It may change the model; the update is recomputed after it runs. |
+| `AfterUpdate`  | After `Save`'s write succeeds.                                    |
+
+`BeforeCreate` runs *before* the ULID and timestamps are assigned, so a hook
+that sets its own `ID` or `CreatedAt` wins.
+
+Hooks fire only where a model instance actually exists — `Create`,
+`CreateMany` and `Save`. A query-level `Update` or `Delete` acts on every
+document the filter matches without hydrating any of them, so there is no
+instance to hand a hook, and manufacturing one would mean either reading
+every matching document first or calling a hook on a model whose fields
+don't reflect what was written. Neither is worth pretending, which is also
+why there is no `BeforeDelete`: nothing in this package deletes a model
+instance.
+
+### Soft deletes
+
+```go
+type User struct {
+	odm.Model       `bson:",inline"`
+	odm.SoftDeletes `bson:",inline"`
+
+	Name string `bson:"name"`
+}
+```
+
+`Delete` then stamps `deleted_at` instead of removing anything, and every
+read on the collection hides the stamped documents:
+
+```go
+users.Get(ctx)                 // live only
+users.WithTrashed().Get(ctx)   // live and deleted
+users.OnlyTrashed().Get(ctx)   // deleted only
+
+users.Where("_id", id).Restore(ctx)      // clears deleted_at
+users.Where("_id", id).ForceDelete(ctx)  // removes it for real
+```
+
+The scope is applied once, at compile time, so `WithTrashed` overrides it
+wherever it appears in the chain, and it never touches a model that doesn't
+embed `SoftDeletes` (where these methods return `ErrInvalidQuery`).
+
+`DeletedAt` is a `*time.Time` with `omitempty`, so a live document carries no
+`deleted_at` field at all rather than a null one. MongoDB's
+`{deleted_at: null}` matches a missing field too, so both shapes read as "not
+deleted" and a collection that gains soft deletes later needs no backfill.
+`Restore` unsets the field rather than nulling it, leaving a restored
+document shaped exactly like one that was never deleted.
+
+Two behaviours worth knowing:
+
+- `ForceDelete` **ignores** the default scope. Purging is the reason to reach
+  for it, and silently skipping the already-trashed documents would be the
+  surprising outcome. `OnlyTrashed().ForceDelete(ctx)` narrows it to a purge
+  of just those.
+- `Restore` only ever touches soft-deleted documents. `WithTrashed` and
+  `OnlyTrashed` make no difference to it.
+
+`Delete`'s `DeletedCount` is the underlying update's `ModifiedCount` on this
+path, so soft-deleting an already-trashed document counts zero.
+
 ### Raw updates
 
 ```go
@@ -266,9 +487,10 @@ staged operators rather than silently dropping them.
 result, err := users.Where("status", "inactive").Delete(ctx)
 ```
 
-This is a **physical** MongoDB delete. There are no soft deletes in this
-package, so nothing is recoverable afterwards, and an unfiltered
-`users.Query().Delete(ctx)` empties the collection.
+On a model without `odm.SoftDeletes` this is a **physical** MongoDB delete —
+nothing is recoverable afterwards, and an unfiltered
+`users.Query().Delete(ctx)` empties the collection. With `odm.SoftDeletes` it
+stamps `deleted_at` instead; see below.
 
 ### Queries are immutable
 
@@ -315,6 +537,12 @@ users.
 - `odm.ErrModelNotFound` — `First`/`Find` matched nothing. The driver's
   `mongo.ErrNoDocuments` stays wrapped underneath, so `errors.Is` finds
   either one.
+- `odm.ErrDuplicateKey` — a write violated a unique index. The driver's
+  `*mongo.WriteException` stays wrapped underneath, so `errors.As` still
+  reaches the constraint name and the offending value.
+- `odm.ErrInvalidCursor` — `CursorPaginate` was handed a cursor it can't
+  use: not this encoding, from an older build, or minted under a different
+  sort.
 - `odm.ErrInvalidQuery` — a builder call was handed invalid input (a
   negative `Limit`, an unknown `Direction`, a non-slice `WhereIn`, a nil
   `WhereRaw`). Builder methods return `*Query[T]` and so have nowhere to put
@@ -324,21 +552,214 @@ users.
 
 Match these sentinels with `errors.Is`, never on the message.
 
+### Save and dirty tracking
+
+A model that came from the database remembers what it looked like then, so
+`Save` can write just the difference:
+
+```go
+user.Name = "Nana Kwesi"
+err := users.Save(ctx, &user)   // $set: { name: ..., updated_at: ... }
+```
+
+Insert or update is decided by whether the model **exists** — hydrated by a
+read, or written by an earlier `Create` or `Save` — never by whether its ID
+looks set. A model you built and gave an `_id` is still new.
+
+```go
+odm.Exists(&user)                    // did this come from the database?
+odm.IsDirty(&user)                   // anything changed?
+odm.IsDirty(&user, "email")          // that field in particular?
+odm.Changes(&user)                   // (bson.M of changes, fields to unset, error)
+odm.Original(&user, "email")         // the value before the change
+```
+
+These are functions rather than methods because they need the whole model,
+and an embedded `odm.Model` can only see itself.
+
+Four things worth knowing:
+
+- **It is a `$set` of changes, never a whole-document replacement.** A field
+  another writer changed in the meantime survives untouched unless this
+  model changed it too.
+- **An unchanged model is not written at all** — no round trip, no
+  `updated_at`, no hooks, no observers.
+- **A field the struct doesn't declare is never touched.** The snapshot is of
+  the *model*, not of the document it was decoded from, so a column from an
+  older schema or another service can't end up in an `$unset`.
+- An `omitempty` field falling to its zero value *is* an `$unset` — that is
+  the difference between "empty" and "absent", and it is deliberate.
+
+Only models embedding `odm.Model` or `odm.IdentityModel` track state; there
+is nowhere else to keep it. For anything else, `Create` and a query-level
+`Update` do the same job explicitly. Models decoded by `Aggregate` are not
+tracked either — a grouped row is not a document.
+
+There is no `WasChanged`: it would need a second snapshot kept past the
+write, and reading `Changes` inside an `Updating` observer covers what it is
+actually for.
+
+### Observers
+
+Observers are the same lifecycle as the model's hooks, moved outside the
+model type — for behavior belonging to the application rather than to the
+document:
+
+```go
+type UserObserver struct{ mailer *Mailer }
+
+func (o UserObserver) Created(ctx context.Context, user *User) error {
+	return o.mailer.Welcome(ctx, user.Email)
+}
+
+odm.Observe[User](database, UserObserver{mailer: mailer})
+```
+
+`Creating`, `Created`, `Updating` and `Updated` are each their own interface,
+so an observer implements only what it needs — and one that implements none
+of them panics at registration, since that is almost always a signature typo.
+
+Registration is **per database**, not per process: there is no package-global
+registry, and a test's database carries its own observers or none. Every
+collection built from that database sees them, whenever it was built. The
+model's own hook runs first, then observers in registration order; the first
+error stops the rest and aborts the write for the `-ing` events.
+
+### Relationships
+
+MongoDB's first answer to "these things belong together" is to embed them.
+Reach for a relation when the related documents are genuinely their own
+collection — queried on their own, updated on their own, or too many to
+embed.
+
+Declare the link once, with the field it writes to kept out of the document:
+
+```go
+type Customer struct {
+	odm.Model `bson:",inline"`
+
+	Name   string  `bson:"name"`
+	Orders []Order `bson:"-"`     // loaded, never stored
+}
+
+var CustomerOrders = odm.HasMany[Customer, Order]{
+	ForeignKey: "customer_id",
+	Attach:     func(c *Customer, orders []Order) { c.Orders = orders },
+}
+
+customers, err := customers.With(CustomerOrders).Get(ctx)
+```
+
+| Declaration                 | Where the key lives | Attach receives |
+| --------------------------- | ------------------- | --------------- |
+| `HasMany[T, R]`             | on the related model | `[]R`, empty when there are none |
+| `HasOne[T, R]`              | on the related model | `*R`, nil when there is none     |
+| `BelongsTo[T, R]`           | on this model        | `*R`, nil when the key is unset or dangling |
+
+`ForeignKey` names the field holding the key; `LocalKey` (or `OwnerKey` on
+`BelongsTo`) names what it points at, defaulting to `_id`.
+
+`Attach` is a function rather than a field name this package would find by
+reflection: the compiler checks it, and there is no string to get wrong. It
+is also the only part of a relation that isn't reflection-free — the keys are
+read straight from the documents' BSON bytes, by the field names you
+declared.
+
+**Loading batches, always.** Each relation costs exactly one extra query
+whatever the number of parents: the keys are collected and the related
+documents fetched with a single `$in`. Two relations over ten parents is
+three queries, not twenty-one. The integration suite asserts this with a
+command monitor rather than taking it on trust.
+
+`With` applies to `Get`, `First`, `Find` and `CursorPaginate`. Nothing loads
+on field access — reading `customer.Orders` is reading a struct field, never
+a query.
+
+Not here: many-to-many, polymorphic relations, pivot models, and nested
+loading (a relation of a relation). Load the second level yourself from the
+first's results. `Relation[T]`'s methods are unexported, so the three
+declarations above are the whole set.
+
+### Transactions
+
+```go
+err := database.Transaction(ctx, func(ctx context.Context) error {
+	if err := users.Create(ctx, &user); err != nil {
+		return err
+	}
+	return accounts.Create(ctx, &account)
+})
+```
+
+Returning nil commits, returning an error aborts.
+
+**The context handed to the callback *is* the transaction.** It carries the
+session, which is how the driver knows an operation belongs to the
+transaction, so every call inside must use that one — a call using the outer
+`ctx` runs outside the transaction and commits on its own. That is also why
+there is no transactional collection type to construct: the collections you
+already have take part by being given this context. Reach the session
+directly with `mongo.SessionFromContext(ctx)`.
+
+Two things to know, both MongoDB's rather than this package's:
+
+- Transactions need a replica set or sharded cluster. On a standalone server
+  the driver errors rather than running the callback unprotected.
+- **The callback can run more than once.** This uses the driver's
+  `WithTransaction`, which is MongoDB's own retry recommendation: it retries
+  on a transient transaction error and retries a commit whose outcome is
+  unknown, giving up after about two minutes. Keep the callback idempotent,
+  and keep anything that isn't a database write — sending mail, charging a
+  card — outside it.
+
+### Indexes
+
+```go
+func (User) Indexes() []odm.Index {
+	return []odm.Index{
+		{Keys: bson.D{{Key: "email", Value: 1}}, Unique: true},
+		{Keys: bson.D{{Key: "business_id", Value: 1}, {Key: "created_at", Value: -1}}},
+	}
+}
+
+err := users.SyncIndexes(ctx)
+```
+
+`Index` carries `Keys`, `Name`, `Unique`, `Sparse`, `ExpireAfter` (a TTL
+index) and `PartialFilter`, and compiles to the driver's `mongo.IndexModel`.
+Anything beyond that — collation, wildcard, text or geo options — belongs on
+`Raw().Indexes()`, which this never gets in the way of.
+
+`SyncIndexes` is safe to call on every start: creating an index that already
+exists with the same specification does nothing. It **only ever adds**. An
+index no longer declared is left alone, and one whose declaration changed
+reports MongoDB's own conflict error rather than being quietly rebuilt —
+dropping an index should be a deliberate act against `Raw().Indexes()`, not
+a side effect of a deploy.
+
+A unique index is what makes `ErrDuplicateKey` reachable:
+
+```go
+if errors.Is(err, odm.ErrDuplicateKey) {
+	// that email is taken
+}
+```
+
 ### Escape hatches
 
 ```go
-database.Raw()  // *mongo.Database — aggregations, indexes, transactions, RunCommand
-users.Raw()     // *mongo.Collection — bulk writes, UpdateMany, InsertOneResult
+database.Raw()  // *mongo.Database — RunCommand, GridFS, change streams
+users.Raw()     // *mongo.Collection — index management, FindOneAndUpdate, InsertOneResult
 users.WhereRaw(bson.M{...})
+users.Where(...).UpdateRaw(ctx, bson.M{...})
+users.Raw().Aggregate(ctx, pipeline)  // no $match prepended, no scope applied
 ```
 
 ## Scope
 
-Deliberately not here yet: soft deletes, timestamps beyond what `Create`
-stamps, hooks and observers, scopes, dirty tracking, `Save`, relationships
-and eager loading, cursor pagination, an aggregation builder, a transaction
-abstraction, index declarations, model factories, migrations. `Raw()` covers
-all of them in the meantime.
+Deliberately not here yet: many-to-many and polymorphic relations, nested
+eager loading, a fluent aggregation builder (the pipeline is already native),
+model factories, migrations. `Raw()` covers all of them in the meantime.
 
 There is no `FirstOrFail`/`FindOrFail`: `First` and `Find` already return
 `odm.ErrModelNotFound` rather than a zero value you have to check, so the
@@ -349,9 +770,49 @@ pair would be the same method twice.
 ```
 go test ./odm/...                    # query building, collection names — no Mongo needed
 go test -tags=integration ./odm/...  # real MongoDB, via testcontainers (needs Docker)
+go test -bench . ./odm/...           # compilation costs, for spotting regressions
 ```
 
-The integration suite starts two containers, MongoDB 8 and MongoDB 7, and
-runs the version-sensitive tests against both — the only way to know that
-each branch of the sorted `UpdateOne` actually works on the server it
-targets.
+The unit suite covers everything that can be decided without a server: what
+BSON a query compiles to, what an update stages, what changed on a model,
+how a cursor encodes. The integration suite covers everything where MongoDB's
+own behavior is the answer — null versus missing, `$nin` on an empty list,
+projection rules, array updates, index conflicts, transaction rollback — and
+starts two containers to do it: MongoDB 8 as a replica set (transactions need
+one) and MongoDB 7 standalone. The version-sensitive tests run against both,
+the only way to know that each branch of the sorted `UpdateOne` works on the
+server it targets.
+
+There is no conformance suite here, unlike [`cache`](../cache) and
+[`storage`](../storage). Those hold several backends to one interface and
+need a shared contract to test them against; this package has one
+implementation of one thing, so a conformance suite would have nothing to
+conform.
+
+## Examples
+
+Compile-checked snippets live in the package documentation:
+
+```
+go doc github.com/nanaaikinson/chandlery/odm
+```
+
+[`examples/odm`](../examples/odm) is the same material as one runnable
+program against a real MongoDB.
+
+## Stability
+
+Pre-v1: the API may still shift. Nothing here is marked experimental — the
+whole package is, in the sense that names can change before v1 — but these
+are the parts most likely to move:
+
+- `Where`'s variadic operator form. It is validated rather than typed, which
+  is the price of accepting both `Where("a", 1)` and `Where("a", ">", 1)`.
+- `Observe`'s `...any`, for the same reason: registration can't be typed
+  against four separate event interfaces at once.
+- Whether `Changes` should return a struct rather than
+  `(bson.M, []string, error)`.
+
+The parts least likely to move are the ones the rest is built on: query
+immutability, `Raw()` at every layer, context on every operation, and the
+sentinel errors.
