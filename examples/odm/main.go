@@ -7,7 +7,7 @@
 // has nothing to do with HTTP, and a server around it would only be in the
 // way.
 //
-// Run it with a MongoDB to talk to:
+// Run it with a MongoDB 8.0 or later to talk to:
 //
 //	MONGO_URL=mongodb://localhost:27017 go run ./examples/odm
 //

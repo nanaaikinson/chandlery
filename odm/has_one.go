@@ -26,10 +26,23 @@ type HasOne[T, R any] struct {
 	LocalKey string
 	// Attach receives the related document, or nil. Required.
 	Attach func(parent *T, related *R)
+	// Nested are relations of the related model, loaded before Attach sees
+	// it. Add them with With rather than setting this directly.
+	Nested []Relation[R]
+}
+
+// With returns a copy of the relation that also loads relations of the
+// related model. See HasMany.With.
+func (r HasOne[T, R]) With(nested ...Relation[R]) HasOne[T, R] {
+	r.Nested = cloneAppend(r.Nested, nested...)
+	return r
 }
 
 func (r HasOne[T, R]) validate() error {
-	return validateRelation("HasOne", r.ForeignKey, r.Attach == nil)
+	if err := validateRelation("HasOne", r.ForeignKey, r.Attach == nil); err != nil {
+		return err
+	}
+	return validateNested("HasOne", r.Nested)
 }
 
 func (r HasOne[T, R]) load(ctx context.Context, db *DB, parents []T, raws []bson.Raw) error {
@@ -44,6 +57,9 @@ func (r HasOne[T, R]) load(ctx context.Context, db *DB, parents []T, raws []bson
 
 	related, relatedRaws, err := relatedDocuments[R](ctx, db, r.ForeignKey, values)
 	if err != nil {
+		return err
+	}
+	if err := loadNested(ctx, db, r.Nested, related, relatedRaws); err != nil {
 		return err
 	}
 	attachFirst(parents, keys, related, groupByKey(relatedRaws, r.ForeignKey), r.Attach)

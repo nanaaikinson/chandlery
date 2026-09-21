@@ -7,23 +7,47 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
+// Operator is a comparison for Where and OrWhere. The constants below are
+// the whole set, and they are typed for the same reason Asc and Desc are:
+// a misspelled operator should be a compile error, not a runtime one.
+//
+// A plain string works too — Where("age", ">", 18) — since spelling the
+// operator out is often clearer at a call site, and it is the form this
+// package shipped with. Both compile to the same filter; only one of them
+// catches a typo before the program runs.
+type Operator string
+
+const (
+	Eq  Operator = "="
+	Ne  Operator = "!="
+	Gt  Operator = ">"
+	Gte Operator = ">="
+	Lt  Operator = "<"
+	Lte Operator = "<="
+)
+
+// eqAlias is the second spelling of equality, accepted because a caller
+// reaching for "==" means the same thing and should not have to find out
+// otherwise at runtime.
+const eqAlias Operator = "=="
+
 // comparisonOperators maps the operators Where accepts to their MongoDB
-// equivalents. Equality is handled separately: "=" compiles to a plain
+// equivalents. Equality is handled separately: it compiles to a plain
 // {field: value} rather than {field: {$eq: value}}, which is the same query
 // and the form anyone reading the shell would have written by hand.
-var comparisonOperators = map[string]string{
-	"!=": "$ne",
-	">":  "$gt",
-	">=": "$gte",
-	"<":  "$lt",
-	"<=": "$lte",
+var comparisonOperators = map[Operator]string{
+	Ne:  "$ne",
+	Gt:  "$gt",
+	Gte: "$gte",
+	Lt:  "$lt",
+	Lte: "$lte",
 }
 
 // comparison compiles one Where/OrWhere call's arguments into a filter
 // fragment. Two shapes are accepted, and nothing else:
 //
 //	(field, value)            equality
-//	(field, operator, value)  =, ==, !=, >, >=, <, <=
+//	(field, operator, value)  an odm.Operator, or the string spelling it
 //
 // A wrong argument count or an unknown operator is an error, never a guess:
 // an operator this package doesn't recognise could only be compiled into a
@@ -34,9 +58,9 @@ func comparison(call, field string, args []any) (bson.M, error) {
 		return bson.M{field: args[0]}, nil
 
 	case 2:
-		operator, ok := args[0].(string)
+		operator, ok := operatorOf(args[0])
 		if !ok {
-			return nil, fmt.Errorf("%w: %s(%q, ...): operator must be a string, got %T", ErrInvalidQuery, call, field, args[0])
+			return nil, fmt.Errorf("%w: %s(%q, ...): operator must be an odm.Operator or a string, got %T", ErrInvalidQuery, call, field, args[0])
 		}
 		return operatorFilter(call, field, operator, args[1])
 
@@ -45,8 +69,20 @@ func comparison(call, field string, args []any) (bson.M, error) {
 	}
 }
 
-func operatorFilter(call, field, operator string, value any) (bson.M, error) {
-	if operator == "=" || operator == "==" {
+// operatorOf accepts either spelling of an operator.
+func operatorOf(arg any) (Operator, bool) {
+	switch typed := arg.(type) {
+	case Operator:
+		return typed, true
+	case string:
+		return Operator(typed), true
+	default:
+		return "", false
+	}
+}
+
+func operatorFilter(call, field string, operator Operator, value any) (bson.M, error) {
+	if operator == Eq || operator == eqAlias {
 		return bson.M{field: value}, nil
 	}
 	if mongoOperator, ok := comparisonOperators[operator]; ok {

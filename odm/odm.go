@@ -3,6 +3,9 @@
 // shaped after Laravel Eloquent's developer experience but staying native
 // MongoDB underneath.
 //
+// It requires MongoDB 8.0 or later: a sorted UpdateOne hands its sort to the
+// server, which earlier versions reject.
+//
 //	database := odm.New(client.Database("app"))
 //	users := odm.Use[User](database)
 //
@@ -54,10 +57,6 @@ import (
 type DB struct {
 	database *mongo.Database
 	now      func() time.Time
-
-	// capabilities is probed lazily, on the first operation whose shape
-	// depends on the server's version. See supportsSortedUpdateOne.
-	capabilities serverCapabilities
 
 	// observers are registered per database rather than per process, so
 	// nothing here is package-global mutable state. See Observe.

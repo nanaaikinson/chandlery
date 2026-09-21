@@ -37,8 +37,14 @@ type Relation[T any] interface {
 // N+1 this exists to avoid.
 //
 // Relations load after the parents are decoded, so they apply to Get, First,
-// Find and CursorPaginate alike. Nested loading (a relation of a relation)
-// is not here; load the second level yourself from the first's results.
+// Find and CursorPaginate alike.
+//
+// A relation can carry its own, through its With method, and the levels
+// stay batched: users, then every order belonging to any of them, then every
+// payment belonging to any of those — three queries for three levels,
+// whatever the number of rows at each.
+//
+//	users.With(UserOrders.With(OrderPayments)).Get(ctx)
 //
 // The related query runs under the related model's own rules, so a
 // soft-deleting target hides its trashed documents here too.
@@ -141,6 +147,33 @@ func groupByKey(raws []bson.Raw, field string) map[keyID][]int {
 // keeping the raw bytes so the results can be grouped by that same field.
 func relatedDocuments[R any](ctx context.Context, db *DB, field string, values bson.A) ([]R, []bson.Raw, error) {
 	return Use[R](db).WhereIn(field, values).fetch(ctx, true)
+}
+
+// loadNested runs a relation's own relations over the documents it just
+// fetched, before they are handed to Attach — Attach copies values, so a
+// nested relation attached afterwards would land on a copy nobody keeps.
+func loadNested[R any](ctx context.Context, db *DB, nested []Relation[R], related []R, raws []bson.Raw) error {
+	for _, relation := range nested {
+		if err := relation.load(ctx, db, related, raws); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateNested checks a relation's own relations at the same time as the
+// relation itself, so a mistake three levels down is still reported before
+// any query runs.
+func validateNested[R any](kind string, nested []Relation[R]) error {
+	for i, relation := range nested {
+		if relation == nil {
+			return fmt.Errorf("%s: nested relation %d is nil", kind, i)
+		}
+		if err := relation.validate(); err != nil {
+			return fmt.Errorf("%s: nested relation %d: %w", kind, i, err)
+		}
+	}
+	return nil
 }
 
 // relationKeys is the shared first half of every relation's load: read the

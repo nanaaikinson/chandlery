@@ -142,7 +142,7 @@ func BenchmarkChangesClean(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, _, err := Changes(model); err != nil {
+		if _, err := Changes(model); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -158,7 +158,7 @@ func BenchmarkChangesDirty(b *testing.B) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, _, err := Changes(model); err != nil {
+		if _, err := Changes(model); err != nil {
 			b.Fatal(err)
 		}
 	}

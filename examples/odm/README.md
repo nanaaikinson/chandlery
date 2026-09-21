@@ -8,7 +8,8 @@ cursor pagination, soft deletes and transactions, in that order.
 MONGO_URL=mongodb://localhost:27017 go run ./examples/odm
 ```
 
-`MONGO_URL` defaults to `mongodb://localhost:27017`. The program writes to a
+`MONGO_URL` defaults to `mongodb://localhost:27017`, and wants MongoDB 8.0
+or later — the version `odm` itself requires. The program writes to a
 database called `odm_example` and drops it on the way out.
 
 The transaction section needs a replica set, which is MongoDB's own

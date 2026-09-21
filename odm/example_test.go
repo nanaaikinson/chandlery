@@ -50,15 +50,33 @@ type Order struct {
 
 	UserID string `bson:"user_id"`
 	Total  int64  `bson:"total"`
+
+	Payments []Payment `bson:"-"`
 }
 
 func (Order) CollectionName() string { return "orders" }
 
-// UserOrders declares the link once, next to the models.
-var UserOrders = odm.HasMany[User, Order]{
-	ForeignKey: "user_id",
-	Attach:     func(u *User, orders []Order) { u.Orders = orders },
+// Payment hangs off an Order, one level further down.
+type Payment struct {
+	odm.Model `bson:",inline"`
+
+	OrderID string `bson:"order_id"`
+	Amount  int64  `bson:"amount"`
 }
+
+func (Payment) CollectionName() string { return "payments" }
+
+// The links are declared once, next to the models.
+var (
+	UserOrders = odm.HasMany[User, Order]{
+		ForeignKey: "user_id",
+		Attach:     func(u *User, orders []Order) { u.Orders = orders },
+	}
+	OrderPayments = odm.HasMany[Order, Payment]{
+		ForeignKey: "order_id",
+		Attach:     func(o *Order, payments []Payment) { o.Payments = payments },
+	}
+)
 
 // Active is a scope: a named piece of filtering, reusable anywhere.
 func Active(q *odm.Query[User]) *odm.Query[User] {
@@ -102,7 +120,7 @@ func ExampleQuery_Where() {
 	// Equality, comparison, sets, ranges and nulls, all ANDed together.
 	adults, err := users.
 		Where("business_id", "b1").
-		Where("age", ">=", 18).
+		Where("age", odm.Gte, 18).
 		WhereNotIn("status", []string{"blocked", "deleted"}).
 		WhereNotNull("email").
 		OrderBy("created_at", odm.Desc).
@@ -184,11 +202,11 @@ func ExampleCollection_Save() {
 		log.Fatal(err)
 	}
 
-	changed, _, err := odm.Changes(&user)
+	changes, err := odm.Changes(&user)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(len(changed)) // 0: saving left the model clean
+	fmt.Println(len(changes.Set)) // 0: saving left the model clean
 }
 
 func ExampleQuery_CursorPaginate() {
@@ -230,6 +248,23 @@ func ExampleQuery_With() {
 	}
 	for _, user := range list {
 		fmt.Println(user.Name, len(user.Orders))
+	}
+}
+
+func ExampleHasMany_With() {
+	var users *odm.Collection[User]
+	ctx := context.Background()
+
+	// Three levels, three queries: the users, every order belonging to any
+	// of them, then every payment belonging to any of those.
+	list, err := users.With(UserOrders.With(OrderPayments)).Get(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, user := range list {
+		for _, order := range user.Orders {
+			fmt.Println(user.Name, order.Total, len(order.Payments))
+		}
 	}
 }
 

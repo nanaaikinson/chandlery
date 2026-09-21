@@ -26,4 +26,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # Pull every container the suite needs at once. Left to itself each
+      # package pulls its own as it runs, and the runner only runs a couple
+      # of package binaries at a time, so the downloads serialize.
+      - run: make pull-images
       - run: make test-integration

@@ -27,10 +27,23 @@ type BelongsTo[T, R any] struct {
 	OwnerKey string
 	// Attach receives the related document, or nil. Required.
 	Attach func(model *T, related *R)
+	// Nested are relations of the related model, loaded before Attach sees
+	// it. Add them with With rather than setting this directly.
+	Nested []Relation[R]
+}
+
+// With returns a copy of the relation that also loads relations of the
+// related model. See HasMany.With.
+func (r BelongsTo[T, R]) With(nested ...Relation[R]) BelongsTo[T, R] {
+	r.Nested = cloneAppend(r.Nested, nested...)
+	return r
 }
 
 func (r BelongsTo[T, R]) validate() error {
-	return validateRelation("BelongsTo", r.ForeignKey, r.Attach == nil)
+	if err := validateRelation("BelongsTo", r.ForeignKey, r.Attach == nil); err != nil {
+		return err
+	}
+	return validateNested("BelongsTo", r.Nested)
 }
 
 func (r BelongsTo[T, R]) load(ctx context.Context, db *DB, parents []T, raws []bson.Raw) error {
@@ -48,6 +61,9 @@ func (r BelongsTo[T, R]) load(ctx context.Context, db *DB, parents []T, raws []b
 	owner := localKeyOr(r.OwnerKey)
 	related, relatedRaws, err := relatedDocuments[R](ctx, db, owner, values)
 	if err != nil {
+		return err
+	}
+	if err := loadNested(ctx, db, r.Nested, related, relatedRaws); err != nil {
 		return err
 	}
 	attachFirst(parents, keys, related, groupByKey(relatedRaws, owner), r.Attach)

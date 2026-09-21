@@ -16,8 +16,9 @@ neither imports the other.
 go get github.com/nanaaikinson/chandlery
 ```
 
-Requires Go 1.26.3+ and
-[mongo-driver/v2](https://go.mongodb.org/mongo-driver/v2).
+Requires Go 1.26.3+, [mongo-driver/v2](https://go.mongodb.org/mongo-driver/v2),
+and **MongoDB 8.0 or later** — a sorted `UpdateOne` hands its sort to the
+server, and earlier versions reject the field.
 
 ## A model
 
@@ -90,7 +91,7 @@ err := users.Create(ctx, &user)
 | Method                            | Notes                                                                                                          |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `Where(field, value)`             | Equality. Repeated calls AND together.                                                                          |
-| `Where(field, operator, value)`    | `=`, `==`, `!=`, `>`, `>=`, `<`, `<=`. Anything else is an error.                                               |
+| `Where(field, operator, value)`    | `odm.Gt`, `odm.Gte`, `odm.Lt`, `odm.Lte`, `odm.Eq`, `odm.Ne` — or the string spelling. Anything else is an error. |
 | `OrWhere(field, [operator,] value)` | ORs with everything accumulated so far — see below.                                                           |
 | `WhereIn(field, values)`          | `$in`. `values` must be a slice or array.                                                                       |
 | `WhereNotIn(field, values)`       | `$nin`. Note an empty slice matches *everything*.                                                               |
@@ -165,6 +166,17 @@ adults, err := users.
 
 Two conditions on one field both survive — `Where("age", ">=", 18).Where("age", "<=", 65)`
 means exactly that, not whichever came last.
+
+Operators come in two spellings, and both compile to the same filter:
+
+```go
+users.Where("age", ">=", 18)        // clear at a call site
+users.Where("age", odm.Gte, 18)     // a typo is a compile error
+```
+
+The typed constants are `odm.Eq`, `odm.Ne`, `odm.Gt`, `odm.Gte`, `odm.Lt` and
+`odm.Lte` — the same treatment `odm.Asc`/`odm.Desc` get, for the same reason.
+A misspelled string is caught too, but only when the query runs.
 
 ### OR queries
 
@@ -254,20 +266,14 @@ job, err := jobs.
 	UpdateOne(ctx)
 ```
 
-That is atomic on every supported server, but it doesn't reach the server
-the same way on all of them. MongoDB 8.0 takes a sort on `updateOne`
-directly; earlier versions reject the field, so a sorted `UpdateOne` goes
-through `findAndModify` there instead. Which one to use is settled by a
-`hello` probe made once per `odm.DB`, on the first sorted `UpdateOne` and
-never again — an unsorted `UpdateOne` is a plain `updateOne` everywhere and
-probes nothing.
+One atomic round trip, with `MatchedCount` and `ModifiedCount` straight from
+the server. The sort travels with the update, which is where this package's
+MongoDB 8.0 requirement comes from.
 
-One wrinkle on the older path: `findAndModify` reports whether a document
-matched, not whether the write changed it, so `ModifiedCount` mirrors
-`MatchedCount` there. On MongoDB 8.0 — and on any unsorted `UpdateOne` —
-both counts are the server's own. `DeleteOne` has no such caveat:
-`deleteOne` takes no sort on any version, so a sorted one always uses
-`findAndModify`, and `DeletedCount` is exact either way.
+`DeleteOne` reaches the same result by a different route: the driver exposes
+no sort on `deleteOne` whatever the server supports, so a sorted `DeleteOne`
+goes through `findAndModify` instead. Atomic all the same, and
+`DeletedCount` is exact.
 
 ### Pagination
 
@@ -570,9 +576,13 @@ looks set. A model you built and gave an `_id` is still new.
 odm.Exists(&user)                    // did this come from the database?
 odm.IsDirty(&user)                   // anything changed?
 odm.IsDirty(&user, "email")          // that field in particular?
-odm.Changes(&user)                   // (bson.M of changes, fields to unset, error)
+odm.Changes(&user)                   // (odm.Changeset, error)
 odm.Original(&user, "email")         // the value before the change
 ```
+
+`Changeset` holds `Set` (a `bson.M` of each changed field's current value)
+and `Unset` (the fields that have gone away) — exactly what the update would
+send.
 
 These are functions rather than methods because they need the whole model,
 and an embedded `odm.Model` can only see itself.
@@ -671,14 +681,24 @@ documents fetched with a single `$in`. Two relations over ten parents is
 three queries, not twenty-one. The integration suite asserts this with a
 command monitor rather than taking it on trust.
 
+A relation can carry its own, and the levels stay batched:
+
+```go
+customers.With(CustomerOrders.With(OrderPayments)).Get(ctx)
+```
+
+Three queries for three levels — customers, then every order belonging to
+any of them, then every payment belonging to any of those — however many
+rows there are at each. `With` copies the declaration rather than changing
+it, so one exported relation works both plain and nested.
+
 `With` applies to `Get`, `First`, `Find` and `CursorPaginate`. Nothing loads
 on field access — reading `customer.Orders` is reading a struct field, never
 a query.
 
-Not here: many-to-many, polymorphic relations, pivot models, and nested
-loading (a relation of a relation). Load the second level yourself from the
-first's results. `Relation[T]`'s methods are unexported, so the three
-declarations above are the whole set.
+Not here: many-to-many, polymorphic relations and pivot models.
+`Relation[T]`'s methods are unexported, so the three declarations above are
+the whole set.
 
 ### Transactions
 
@@ -757,9 +777,9 @@ users.Raw().Aggregate(ctx, pipeline)  // no $match prepended, no scope applied
 
 ## Scope
 
-Deliberately not here yet: many-to-many and polymorphic relations, nested
-eager loading, a fluent aggregation builder (the pipeline is already native),
-model factories, migrations. `Raw()` covers all of them in the meantime.
+Deliberately not here yet: many-to-many and polymorphic relations, a fluent
+aggregation builder (the pipeline is already native), model factories,
+migrations. `Raw()` covers all of them in the meantime.
 
 There is no `FirstOrFail`/`FindOrFail`: `First` and `Find` already return
 `odm.ErrModelNotFound` rather than a zero value you have to check, so the
@@ -773,15 +793,18 @@ go test -tags=integration ./odm/...  # real MongoDB, via testcontainers (needs D
 go test -bench . ./odm/...           # compilation costs, for spotting regressions
 ```
 
+`make pull-images` fetches every container the integration suite starts, all
+at once — worth running first on a cold machine, since otherwise each
+package pulls its own as it runs.
+
 The unit suite covers everything that can be decided without a server: what
 BSON a query compiles to, what an update stages, what changed on a model,
 how a cursor encodes. The integration suite covers everything where MongoDB's
 own behavior is the answer — null versus missing, `$nin` on an empty list,
 projection rules, array updates, index conflicts, transaction rollback — and
-starts two containers to do it: MongoDB 8 as a replica set (transactions need
-one) and MongoDB 7 standalone. The version-sensitive tests run against both,
-the only way to know that each branch of the sorted `UpdateOne` works on the
-server it targets.
+starts one container to do it: MongoDB 8 as a replica set, because
+transactions need one and it is closer to what anything using this package
+runs against anyway.
 
 There is no conformance suite here, unlike [`cache`](../cache) and
 [`storage`](../storage). Those hold several backends to one interface and
@@ -803,15 +826,20 @@ program against a real MongoDB.
 ## Stability
 
 Pre-v1: the API may still shift. Nothing here is marked experimental — the
-whole package is, in the sense that names can change before v1 — but these
-are the parts most likely to move:
+whole package is, in the sense that names can change before v1.
 
-- `Where`'s variadic operator form. It is validated rather than typed, which
-  is the price of accepting both `Where("a", 1)` and `Where("a", ">", 1)`.
-- `Observe`'s `...any`, for the same reason: registration can't be typed
-  against four separate event interfaces at once.
-- Whether `Changes` should return a struct rather than
-  `(bson.M, []string, error)`.
+Three things flagged in an earlier review have been settled:
+
+- **`Where`'s operator is typed now**, as `odm.Gt` and friends, with the
+  string spelling still accepted. Keeping both is the price of a `Where` that
+  takes two arguments or three; typing one of them is what makes a typo a
+  compile error.
+- **`Changes` returns a `Changeset`**, not a three-value tuple.
+- **`Observe` still takes `...any`**, and will. Go cannot express "implements
+  at least one of these four interfaces": a single `Observer[T]` would force
+  every observer to implement all four events, and one registration function
+  per event would turn an observer watching three of them into three calls.
+  The mismatch it can't catch at compile time, it panics on at registration.
 
 The parts least likely to move are the ones the rest is built on: query
 immutability, `Raw()` at every layer, context on every operation, and the

@@ -490,8 +490,8 @@ func TestObservers(t *testing.T) {
 				if original, ok := odm.Original(a, "title"); ok {
 					_ = original.Unmarshal(&wasTitle)
 				}
-				set, _, err := odm.Changes(a)
-				changed = set
+				got, err := odm.Changes(a)
+				changed = got.Set
 				return err
 			},
 		})

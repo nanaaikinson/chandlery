@@ -206,17 +206,10 @@ func (q *Query[T]) Update(ctx context.Context) (*mongo.UpdateResult, error) {
 //		Set("status", "processing").
 //		UpdateOne(ctx)
 //
-// How that reaches the server depends on the server. MongoDB 8.0 accepts a
-// sort on updateOne directly; earlier versions reject the field, so a sorted
-// UpdateOne goes through findAndModify there instead — atomic and
-// single-round-trip either way, chosen by a capability probe made once per
-// DB (see supportsSortedUpdateOne). An unsorted UpdateOne is a plain
-// updateOne on every version and probes nothing.
-//
-// One wrinkle on the older path: findAndModify reports whether a document
-// matched, but not whether the write actually changed it, so the returned
-// ModifiedCount mirrors MatchedCount there. On MongoDB 8.0, and on any
-// unsorted UpdateOne, both counts are the server's own.
+// The sort goes to the server as part of the update, which is what makes
+// this package require MongoDB 8.0: earlier servers reject the field. It is
+// one atomic round trip, and MatchedCount and ModifiedCount are the server's
+// own.
 func (q *Query[T]) UpdateOne(ctx context.Context) (*mongo.UpdateResult, error) {
 	update, err := q.stagedUpdate("UpdateOne")
 	if err != nil {
@@ -231,24 +224,9 @@ func (q *Query[T]) updateOne(ctx context.Context, update any) (*mongo.UpdateResu
 		result, err := collection.UpdateOne(ctx, q.filter(), update)
 		return result, classify(err)
 	}
-	if q.collection.db.supportsSortedUpdateOne(ctx) {
-		result, err := collection.UpdateOne(ctx, q.filter(), update, options.UpdateOne().SetSort(q.sorts))
-		return result, classify(err)
-	}
 
-	// The document itself is discarded, so ask for the smallest one the
-	// server will send back.
-	opts := options.FindOneAndUpdate().
-		SetSort(q.sorts).
-		SetProjection(bson.M{"_id": 1})
-
-	switch err := collection.FindOneAndUpdate(ctx, q.filter(), update, opts).Err(); {
-	case errors.Is(err, mongo.ErrNoDocuments):
-		return &mongo.UpdateResult{}, nil
-	case err != nil:
-		return nil, classify(err)
-	}
-	return &mongo.UpdateResult{MatchedCount: 1, ModifiedCount: 1}, nil
+	result, err := collection.UpdateOne(ctx, q.filter(), update, options.UpdateOne().SetSort(q.sorts))
+	return result, classify(err)
 }
 
 // stagedUpdate compiles the staged operators, rejecting an empty update
@@ -340,10 +318,12 @@ func (q *Query[T]) Delete(ctx context.Context) (*mongo.DeleteResult, error) {
 
 // DeleteOne removes at most one matching document, soft-deleting it on a
 // model that embeds odm.SoftDeletes exactly as Delete does, and honouring
-// OrderBy to choose which one. The driver's deleteOne carries no sort option
-// on any server version, so a sorted DeleteOne always goes through
-// findAndModify; an unsorted one is a plain deleteOne. Both are atomic, and
-// DeletedCount is exact either way.
+// OrderBy to choose which one.
+//
+// Unlike UpdateOne, this can't hand the sort to deleteOne: the driver
+// exposes no sort option there, whatever the server supports. A sorted
+// DeleteOne goes through findAndModify instead, an unsorted one is a plain
+// deleteOne, and both are atomic with an exact DeletedCount.
 func (q *Query[T]) DeleteOne(ctx context.Context) (*mongo.DeleteResult, error) {
 	if q.err != nil {
 		return nil, q.err

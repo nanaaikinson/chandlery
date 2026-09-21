@@ -36,6 +36,55 @@ func TestWhereComparisonOperators(t *testing.T) {
 	}
 }
 
+func TestWhereTypedOperators(t *testing.T) {
+	t.Parallel()
+
+	// The typed constants and their string spellings have to compile to the
+	// same filter, or one of the two forms is a trap.
+	pairs := []struct {
+		typed Operator
+		spelt string
+	}{
+		{Eq, "="},
+		{Ne, "!="},
+		{Gt, ">"},
+		{Gte, ">="},
+		{Lt, "<"},
+		{Lte, "<="},
+	}
+
+	for _, pair := range pairs {
+		t.Run(string(pair.typed), func(t *testing.T) {
+			t.Parallel()
+
+			typed := testCollection().Where("age", pair.typed, 18).filter()
+			spelt := testCollection().Where("age", pair.spelt, 18).filter()
+			if !reflect.DeepEqual(typed, spelt) {
+				t.Errorf("Where(odm.%v) = %v, Where(%q) = %v, want the same filter", pair.typed, typed, pair.spelt, spelt)
+			}
+		})
+	}
+
+	t.Run("rejects an Operator that is not one of the constants", func(t *testing.T) {
+		t.Parallel()
+
+		assertInvalidQuery(t, testCollection().Where("age", Operator("=>"), 18))
+	})
+
+	t.Run("composes like any other condition", func(t *testing.T) {
+		t.Parallel()
+
+		got := testCollection().Where("age", Gte, 18).Where("age", Lte, 65).filter()
+		want := any(bson.M{"$and": bson.A{
+			bson.M{"age": bson.M{"$gte": 18}},
+			bson.M{"age": bson.M{"$lte": 65}},
+		}})
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("filter() = %v, want %v", got, want)
+		}
+	})
+}
+
 func TestWhereArgumentValidation(t *testing.T) {
 	t.Parallel()
 
@@ -51,7 +100,7 @@ func TestWhereArgumentValidation(t *testing.T) {
 		assertInvalidQuery(t, testCollection().Where("name", "like", "nana%"))
 	})
 
-	t.Run("rejects a non-string operator", func(t *testing.T) {
+	t.Run("rejects an operator that is neither a string nor an Operator", func(t *testing.T) {
 		t.Parallel()
 
 		assertInvalidQuery(t, testCollection().Where("age", 18, 21))

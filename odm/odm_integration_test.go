@@ -55,15 +55,7 @@ var clockAt = func(at time.Time) odm.Option {
 func newUsers(t *testing.T, opts ...odm.Option) *odm.Collection[user] {
 	t.Helper()
 
-	return newUsersOn(t, client, opts...)
-}
-
-// newUsersOn is newUsers against a chosen server, for the handful of tests
-// that have to run on both MongoDB 8 and an older one.
-func newUsersOn(t *testing.T, on *mongo.Client, opts ...odm.Option) *odm.Collection[user] {
-	t.Helper()
-
-	return odm.Use[user](odm.New(testDatabase(t, on), opts...))
+	return odm.Use[user](odm.New(testDatabase(t, client), opts...))
 }
 
 // testDatabase gives the calling test its own database, dropped afterwards.

@@ -78,54 +78,63 @@ func IsPersisted[T any](model *T) bool {
 	return ok && state.exists
 }
 
-// Changes reports what Save would write: the persisted fields whose value
-// differs from the snapshot, as a bson.M, plus the fields that have gone
-// away and would be unset.
+// Changeset is what Save would write: the fields whose value differs from
+// the snapshot, and the fields that have gone away.
+type Changeset struct {
+	// Set holds each changed or newly present field and its current value,
+	// exactly as it would be sent in a $set.
+	Set bson.M
+	// Unset names the fields that were in the snapshot and are no longer in
+	// the model — an omitempty field that fell to its zero value.
+	Unset []string
+}
+
+// Changes reports what Save would write.
 //
 // The comparison is of BSON, not of Go memory, so it respects the model's
 // own tags — a `bson:"-"` field (a loaded relation, say) is not a change,
 // and an omitempty field falling to its zero value is a removal rather than
 // an update. A model that doesn't exist yet reports no changes: everything
 // about it is new.
-func Changes[T any](model *T) (bson.M, []string, error) {
-	_, set, unset, err := changesOf(model)
-	return set, unset, err
+func Changes[T any](model *T) (Changeset, error) {
+	_, changes, err := changesOf(model)
+	return changes, err
 }
 
 // changesOf is Changes plus the marshalled model it compared, which Save
 // needs anyway to find the document's _id — one marshal, not two.
-func changesOf[T any](model *T) (bson.Raw, bson.M, []string, error) {
+func changesOf[T any](model *T) (bson.Raw, Changeset, error) {
 	state, ok := stateOf(model)
 	if !ok || !state.exists {
-		return nil, nil, nil, nil
+		return nil, Changeset{}, nil
 	}
 
 	current, err := bson.Marshal(model)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("odm: reading model: %w", err)
+		return nil, Changeset{}, fmt.Errorf("odm: reading model: %w", err)
 	}
 	set, unset, err := diff(state.original, current)
-	return current, set, unset, err
+	return current, Changeset{Set: set, Unset: unset}, err
 }
 
 // IsDirty reports whether the model differs from its snapshot. Given field
 // names it asks only about those, which is the common case in a hook:
 // "did the email change?"
 func IsDirty[T any](model *T, fields ...string) (bool, error) {
-	set, unset, err := Changes(model)
+	changes, err := Changes(model)
 	if err != nil {
 		return false, err
 	}
 
 	if len(fields) == 0 {
-		return len(set) > 0 || len(unset) > 0, nil
+		return len(changes.Set) > 0 || len(changes.Unset) > 0, nil
 	}
 
 	for _, field := range fields {
-		if _, ok := set[field]; ok {
+		if _, ok := changes.Set[field]; ok {
 			return true, nil
 		}
-		for _, removed := range unset {
+		for _, removed := range changes.Unset {
 			if removed == field {
 				return true, nil
 			}
@@ -261,18 +270,18 @@ func (c *Collection[T]) update(ctx context.Context, model *T) error {
 
 	// Recomputed, because the hook and the observers were free to change
 	// the model and what they changed has to be written too.
-	current, set, unset, err := changesOf(model)
+	current, changes, err := changesOf(model)
 	if err != nil {
 		return err
 	}
-	if len(set) == 0 && len(unset) == 0 {
+	if len(changes.Set) == 0 && len(changes.Unset) == 0 {
 		return nil
 	}
 
 	if stamp, ok := any(model).(timestamped); ok {
 		now := c.now()
 		stamp.touchUpdatedAt(now)
-		set[updatedAtField] = now
+		changes.Set[updatedAtField] = now
 	}
 
 	id, err := current.LookupErr("_id")
@@ -281,12 +290,12 @@ func (c *Collection[T]) update(ctx context.Context, model *T) error {
 	}
 
 	update := bson.D{}
-	if len(set) > 0 {
-		update = append(update, bson.E{Key: "$set", Value: set})
+	if len(changes.Set) > 0 {
+		update = append(update, bson.E{Key: "$set", Value: changes.Set})
 	}
-	if len(unset) > 0 {
-		removed := make(bson.D, len(unset))
-		for i, field := range unset {
+	if len(changes.Unset) > 0 {
+		removed := make(bson.D, len(changes.Unset))
+		for i, field := range changes.Unset {
 			removed[i] = bson.E{Key: field, Value: ""}
 		}
 		update = append(update, bson.E{Key: "$unset", Value: removed})

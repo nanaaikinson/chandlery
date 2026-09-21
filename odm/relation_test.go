@@ -18,6 +18,15 @@ type order struct {
 
 func (order) CollectionName() string { return "orders" }
 
+// payment is a second level down from order, for the nesting tests.
+type payment struct {
+	Model `bson:",inline"`
+
+	OrderID string `bson:"order_id"`
+}
+
+func (payment) CollectionName() string { return "payments" }
+
 func rawDocs(t *testing.T, documents ...bson.M) []bson.Raw {
 	t.Helper()
 
@@ -267,5 +276,96 @@ func TestWith(t *testing.T) {
 		t.Parallel()
 
 		assertInvalidQuery(t, testCollection().With(HasMany[User, order]{ForeignKey: "user_id"}))
+	})
+}
+
+func TestNestedRelations(t *testing.T) {
+	t.Parallel()
+
+	orderPayments := HasMany[order, payment]{
+		ForeignKey: "order_id",
+		Attach:     func(*order, []payment) {},
+	}
+	userOrders := HasMany[User, order]{
+		ForeignKey: "user_id",
+		Attach:     func(*User, []order) {},
+	}
+
+	t.Run("With records the nested relation", func(t *testing.T) {
+		t.Parallel()
+
+		nested := userOrders.With(orderPayments)
+		if len(nested.Nested) != 1 {
+			t.Errorf("Nested = %d relations, want 1", len(nested.Nested))
+		}
+	})
+
+	t.Run("leaves the declaration it was called on alone", func(t *testing.T) {
+		t.Parallel()
+
+		// One exported relation should be usable both plain and nested,
+		// which only holds if With copies.
+		_ = userOrders.With(orderPayments)
+		if len(userOrders.Nested) != 0 {
+			t.Errorf("the original declaration grew %d nested relations", len(userOrders.Nested))
+		}
+	})
+
+	t.Run("branches keep independent nesting", func(t *testing.T) {
+		t.Parallel()
+
+		withPayments := userOrders.With(orderPayments)
+		withTwo := userOrders.With(orderPayments, orderPayments)
+
+		if len(withPayments.Nested) != 1 || len(withTwo.Nested) != 2 {
+			t.Errorf("nested counts = %d and %d, want 1 and 2", len(withPayments.Nested), len(withTwo.Nested))
+		}
+	})
+
+	t.Run("validates the nested declaration too", func(t *testing.T) {
+		t.Parallel()
+
+		broken := userOrders.With(HasMany[order, payment]{ForeignKey: "order_id"})
+		if err := broken.validate(); err == nil || !strings.Contains(err.Error(), "nested relation 0") {
+			t.Errorf("validate() = %v, want it to name the nested relation", err)
+		}
+	})
+
+	t.Run("rejects a nil nested relation", func(t *testing.T) {
+		t.Parallel()
+
+		if err := userOrders.With(nil).validate(); err == nil {
+			t.Error("validate() = nil, want a complaint about the nil relation")
+		}
+	})
+
+	t.Run("surfaces through With before any I/O", func(t *testing.T) {
+		t.Parallel()
+
+		broken := userOrders.With(HasMany[order, payment]{ForeignKey: "order_id"})
+		assertInvalidQuery(t, testCollection().With(broken))
+	})
+
+	t.Run("HasOne and BelongsTo nest the same way", func(t *testing.T) {
+		t.Parallel()
+
+		hasOne := HasOne[User, order]{
+			ForeignKey: "user_id",
+			Attach:     func(*User, *order) {},
+		}.With(orderPayments)
+		belongsTo := BelongsTo[User, order]{
+			ForeignKey: "order_id",
+			Attach:     func(*User, *order) {},
+		}.With(orderPayments)
+
+		if len(hasOne.Nested) != 1 || len(belongsTo.Nested) != 1 {
+			t.Errorf("nested counts = %d and %d, want 1 each", len(hasOne.Nested), len(belongsTo.Nested))
+		}
+		if err := hasOne.validate(); err != nil {
+			t.Errorf("HasOne validate() = %v, want nil", err)
+		}
+		if err := belongsTo.validate(); err != nil {
+			t.Errorf("BelongsTo validate() = %v, want nil", err)
+		}
 	})
 }

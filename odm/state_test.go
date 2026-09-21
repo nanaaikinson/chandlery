@@ -32,11 +32,11 @@ func newTracked(t *testing.T, model *tracked) *tracked {
 func changesOrFail(t *testing.T, model *tracked) (bson.M, []string) {
 	t.Helper()
 
-	set, unset, err := Changes(model)
+	changes, err := Changes(model)
 	if err != nil {
 		t.Fatalf("Changes() error = %v", err)
 	}
-	return set, unset
+	return changes.Set, changes.Unset
 }
 
 func TestIsPersisted(t *testing.T) {
@@ -162,12 +162,12 @@ func TestChanges(t *testing.T) {
 	t.Run("an untracked model reports nothing", func(t *testing.T) {
 		t.Parallel()
 
-		set, unset, err := Changes(&plainDoc{ID: "a", Name: "Nana"})
+		changes, err := Changes(&plainDoc{ID: "a", Name: "Nana"})
 		if err != nil {
 			t.Fatalf("Changes() error = %v", err)
 		}
-		if set != nil || unset != nil {
-			t.Errorf("Changes() = %v / %v, want none", set, unset)
+		if changes.Set != nil || changes.Unset != nil {
+			t.Errorf("Changes() = %+v, want none", changes)
 		}
 	})
 }

@@ -34,8 +34,9 @@ Requires Go 1.26.3+.
   immutable query builder (`odm.Use[User](database).Where("age", ">=", 18).Get(ctx)`)
   with atomic updates, soft deletes, scopes, hooks and observers, cursor
   pagination, batched eager loading, transactions and index declarations —
-  and the driver's own types never more than a `Raw()` away. Independent of
-  `db`: the two share no types and neither imports the other.
+  and the driver's own types never more than a `Raw()` away. Needs MongoDB
+  8.0+. Independent of `db`: the two share no types and neither imports the
+  other.
 - [`storage`](storage) — a driver-agnostic `Disk` contract mirroring
   Laravel's `Storage::disk()` (`Put`/`Get`, `Copy`/`Move`, `Url`/
   `TemporaryUrl`/`PresignedPutUrl`, directory listing, ...), with backends

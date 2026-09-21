@@ -54,9 +54,15 @@ type Updated[T any] interface {
 // say — carries its own observers or none. Every collection built from that
 // database sees them, whenever it was built.
 //
-// An observer implementing none of the four event interfaces is a mistake
-// that would otherwise be silent, usually a signature typo, so it panics.
-// Register at startup, alongside odm.New.
+// observers is an ...any rather than a typed parameter because Go has no way
+// to say "implements at least one of these four": a single Observer[T]
+// interface would force every observer to implement all four events, and one
+// registration function per event would turn an observer that watches three
+// of them into three calls. The cost is that a mismatch — almost always a
+// signature typo, or an observer written for another model — can only be
+// caught at registration, where it panics rather than going silently
+// unregistered. Register at startup, alongside odm.New, and a typo fails the
+// process before it serves anything.
 func Observe[T any](db *DB, observers ...any) {
 	if db == nil {
 		panic("odm: Observe: db is nil")
@@ -64,7 +70,10 @@ func Observe[T any](db *DB, observers ...any) {
 
 	for _, observer := range observers {
 		if !observesAnything[T](observer) {
-			panic(fmt.Sprintf("odm: Observe[%s]: %T implements none of Creating/Created/Updating/Updated for that model", reflect.TypeFor[T](), observer))
+			panic(fmt.Sprintf(
+				"odm: Observe[%[1]s]: %[2]T implements none of Creating[%[1]s], Created[%[1]s], Updating[%[1]s] or Updated[%[1]s] — check the method signatures, and that the model type matches",
+				reflect.TypeFor[T](), observer,
+			))
 		}
 	}
 

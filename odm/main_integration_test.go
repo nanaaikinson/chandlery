@@ -25,15 +25,8 @@ import (
 // outright.
 var client *mongo.Client
 
-// legacyClient points at a second, older server. UpdateOne compiles a sorted
-// update differently either side of MongoDB 8.0 — natively on 8.0, through
-// findAndModify before it — and the only way to know both branches work is
-// to run them against both servers rather than to assert on which branch was
-// chosen.
-var legacyClient *mongo.Client
-
-// primaryURI is the replica set's connection string, for the one test that
-// needs a client of its own — a command monitor counting queries.
+// primaryURI is the container's connection string, for the tests that need a
+// client of their own — a command monitor counting queries.
 var primaryURI string
 
 func TestMain(m *testing.M) {
@@ -43,25 +36,19 @@ func TestMain(m *testing.M) {
 func run(m *testing.M) int {
 	ctx := context.Background()
 
-	// A replica set, not a standalone: MongoDB only allows transactions
-	// there, and it is closer to what anything using this package runs
-	// against anyway.
-	primary, uri, cleanup, err := start(ctx, "mongo:8", tcmongo.WithReplicaSet("rs0"))
+	// MongoDB 8, because that is what this package requires: a sorted
+	// UpdateOne hands the sort to the server, which earlier versions
+	// reject. A replica set, because transactions need one — and because it
+	// is closer to what anything using this package runs against anyway.
+	connected, uri, cleanup, err := start(ctx, "mongo:8", tcmongo.WithReplicaSet("rs0"))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "starting mongodb 8:", err)
+		fmt.Fprintln(os.Stderr, "starting mongodb:", err)
 		return 1
 	}
 	defer cleanup()
-	client = primary
-	primaryURI = uri
 
-	legacy, _, cleanupLegacy, err := start(ctx, "mongo:7")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "starting mongodb 7:", err)
-		return 1
-	}
-	defer cleanupLegacy()
-	legacyClient = legacy
+	client = connected
+	primaryURI = uri
 
 	return m.Run()
 }

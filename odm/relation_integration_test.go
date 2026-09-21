@@ -36,9 +36,19 @@ type purchase struct {
 	Total      int    `bson:"total"`
 
 	Customer *customer `bson:"-"`
+	Payments []payment `bson:"-"`
 }
 
 func (purchase) CollectionName() string { return "purchases" }
+
+type payment struct {
+	odm.Model `bson:",inline"`
+
+	PurchaseID string `bson:"purchase_id"`
+	Amount     int    `bson:"amount"`
+}
+
+func (payment) CollectionName() string { return "payments" }
 
 type profile struct {
 	odm.Model `bson:",inline"`
@@ -62,6 +72,10 @@ var (
 		ForeignKey: "customer_id",
 		Attach:     func(p *purchase, c *customer) { p.Customer = c },
 	}
+	purchasePayments = odm.HasMany[purchase, payment]{
+		ForeignKey: "purchase_id",
+		Attach:     func(p *purchase, payments []payment) { p.Payments = payments },
+	}
 )
 
 // shop wires the three collections onto one database.
@@ -69,6 +83,7 @@ type shop struct {
 	customers *odm.Collection[customer]
 	purchases *odm.Collection[purchase]
 	profiles  *odm.Collection[profile]
+	payments  *odm.Collection[payment]
 }
 
 func newShop(t *testing.T) shop {
@@ -84,6 +99,7 @@ func shopOn(t *testing.T, database *odm.DB) shop {
 		customers: odm.Use[customer](database),
 		purchases: odm.Use[purchase](database),
 		profiles:  odm.Use[profile](database),
+		payments:  odm.Use[payment](database),
 	}
 }
 
@@ -433,5 +449,124 @@ func TestRelationFieldsAreNotStored(t *testing.T) {
 	}
 	if len(stored) != 4 {
 		t.Errorf("stored document = %v, want only _id, name and the timestamps", stored)
+	}
+}
+
+func TestNestedEagerLoading(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	finds := map[string]int{}
+	monitor := &event.CommandMonitor{
+		Started: func(_ context.Context, e *event.CommandStartedEvent) {
+			if e.CommandName != "find" {
+				return
+			}
+			if collection, ok := e.Command.Lookup("find").StringValueOK(); ok {
+				mu.Lock()
+				finds[collection]++
+				mu.Unlock()
+			}
+		},
+	}
+
+	watched, err := mongo.Connect(options.Client().ApplyURI(primaryURI).SetMonitor(monitor))
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	t.Cleanup(func() { watched.Disconnect(context.Background()) })
+
+	s := shopOn(t, odm.New(testDatabase(t, watched)))
+
+	const customers = 4
+	for i := range customers {
+		owner := &customer{Name: string(rune('a' + i))}
+		create(t, s.customers, owner)
+
+		for j := range 2 {
+			order := &purchase{CustomerID: owner.ID, Total: i*10 + j}
+			create(t, s.purchases, order)
+			create(t, s.payments,
+				&payment{PurchaseID: order.ID, Amount: 1},
+				&payment{PurchaseID: order.ID, Amount: 2},
+			)
+		}
+	}
+
+	mu.Lock()
+	finds = map[string]int{}
+	mu.Unlock()
+
+	// customers -> purchases -> payments, three levels deep.
+	got, err := s.customers.
+		With(customerOrders.With(purchasePayments)).
+		OrderBy("name", odm.Asc).
+		Get(ctx)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if len(got) != customers {
+		t.Fatalf("Get() returned %d customers, want %d", len(got), customers)
+	}
+	for _, c := range got {
+		if len(c.Orders) != 2 {
+			t.Fatalf("%q has %d orders, want 2", c.Name, len(c.Orders))
+		}
+		for _, order := range c.Orders {
+			if len(order.Payments) != 2 {
+				t.Errorf("%q order %d has %d payments, want 2", c.Name, order.Total, len(order.Payments))
+			}
+			total := 0
+			for _, p := range order.Payments {
+				total += p.Amount
+			}
+			if total != 3 {
+				t.Errorf("%q order %d payments total %d, want 3", c.Name, order.Total, total)
+			}
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// One query per level, not one per row at the level above.
+	if finds["customers"] != 1 || finds["purchases"] != 1 || finds["payments"] != 1 {
+		t.Errorf("find commands = %v, want exactly one per level over %d customers and %d orders", finds, customers, customers*2)
+	}
+}
+
+func TestNestedRelationLeavesTheDeclarationAlone(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := newShop(t)
+
+	nana := &customer{Name: "nana"}
+	create(t, s.customers, nana)
+	order := &purchase{CustomerID: nana.ID, Total: 10}
+	create(t, s.purchases, order)
+	create(t, s.payments, &payment{PurchaseID: order.ID, Amount: 5})
+
+	// The nested form and the plain form of one exported declaration have
+	// to keep working side by side.
+	nested, err := s.customers.With(customerOrders.With(purchasePayments)).First(ctx)
+	if err != nil {
+		t.Fatalf("First() error = %v", err)
+	}
+	if len(nested.Orders) != 1 || len(nested.Orders[0].Payments) != 1 {
+		t.Fatalf("nested load = %+v, want one order carrying one payment", nested.Orders)
+	}
+
+	plain, err := s.customers.With(customerOrders).First(ctx)
+	if err != nil {
+		t.Fatalf("First() error = %v", err)
+	}
+	if len(plain.Orders) != 1 {
+		t.Fatalf("plain load = %+v, want one order", plain.Orders)
+	}
+	if plain.Orders[0].Payments != nil {
+		t.Errorf("payments = %v, want none — the plain declaration must not have picked up the nesting", plain.Orders[0].Payments)
 	}
 }

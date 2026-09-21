@@ -38,10 +38,30 @@ type HasMany[T, R any] struct {
 	// MongoDB returned them, and an empty slice when there are none.
 	// Required.
 	Attach func(parent *T, related []R)
+	// Nested are relations of the related model, loaded before Attach sees
+	// them. Add them with With rather than setting this directly.
+	Nested []Relation[R]
+}
+
+// With returns a copy of the relation that also loads relations of the
+// related model:
+//
+//	users.With(UserOrders.With(OrderPayments)).Get(ctx)
+//
+// Each level is still one query, so this is three in total however many
+// users and orders there are. The declaration itself is unchanged — With
+// copies it, the same way a query builder copies a query — so one exported
+// relation can be used both plain and nested.
+func (r HasMany[T, R]) With(nested ...Relation[R]) HasMany[T, R] {
+	r.Nested = cloneAppend(r.Nested, nested...)
+	return r
 }
 
 func (r HasMany[T, R]) validate() error {
-	return validateRelation("HasMany", r.ForeignKey, r.Attach == nil)
+	if err := validateRelation("HasMany", r.ForeignKey, r.Attach == nil); err != nil {
+		return err
+	}
+	return validateNested("HasMany", r.Nested)
 }
 
 func (r HasMany[T, R]) load(ctx context.Context, db *DB, parents []T, raws []bson.Raw) error {
@@ -56,6 +76,9 @@ func (r HasMany[T, R]) load(ctx context.Context, db *DB, parents []T, raws []bso
 
 	related, relatedRaws, err := relatedDocuments[R](ctx, db, r.ForeignKey, values)
 	if err != nil {
+		return err
+	}
+	if err := loadNested(ctx, db, r.Nested, related, relatedRaws); err != nil {
 		return err
 	}
 	grouped := groupByKey(relatedRaws, r.ForeignKey)
