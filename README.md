@@ -29,6 +29,12 @@ Requires Go 1.26.3+.
   backends in their own subpackage: [`cache/memory`](cache/memory) (in-process
   map) and [`cache/redis`](cache/redis) (real Redis, via
   [go-redis](https://github.com/redis/go-redis)).
+- [`odm`](odm) — a small MongoDB object-document mapper over
+  [mongo-driver/v2](https://go.mongodb.org/mongo-driver/v2): a generic,
+  immutable query builder (`odm.Use[User](database).Where("age", ">=", 18).Get(ctx)`)
+  with atomic updates (`$set`/`$inc`/`$push`/...) and the driver's own types
+  never more than a `Raw()` away. Independent of `db` — the two share no
+  types and neither imports the other.
 - [`storage`](storage) — a driver-agnostic `Disk` contract mirroring
   Laravel's `Storage::disk()` (`Put`/`Get`, `Copy`/`Move`, `Url`/
   `TemporaryUrl`/`PresignedPutUrl`, directory listing, ...), with backends
