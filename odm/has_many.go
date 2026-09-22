@@ -65,31 +65,48 @@ func (r HasMany[T, R]) validate() error {
 }
 
 func (r HasMany[T, R]) load(ctx context.Context, db *DB, parents []T, raws []bson.Raw) error {
-	keys, values, matched, err := relationKeys(raws, localKeyOr(r.LocalKey))
+	return loadMany(ctx, db, parents, raws, localKeyOr(r.LocalKey), r.ForeignKey, r.Nested, r.Attach)
+}
+
+// loadMany is the body both many-valued relations share. They differ only in
+// which side holds which key: HasMany reads the parent's own key and matches
+// it against a field on the related model, BelongsToMany reads a list off
+// the parent and matches it against the related model's own key. Either way
+// it is one query and an in-memory grouping.
+func loadMany[T, R any](
+	ctx context.Context,
+	db *DB,
+	parents []T,
+	raws []bson.Raw,
+	parentKey, relatedKey string,
+	nested []Relation[R],
+	attach func(*T, []R),
+) error {
+	keys, values, matched, err := relationKeys(raws, parentKey)
 	if err != nil {
 		return err
 	}
 	if !matched {
-		attachEmpty(parents, r.Attach)
+		attachEmpty(parents, attach)
 		return nil
 	}
 
-	related, relatedRaws, err := relatedDocuments[R](ctx, db, r.ForeignKey, values)
+	related, relatedRaws, err := relatedDocuments[R](ctx, db, relatedKey, values)
 	if err != nil {
 		return err
 	}
-	if err := loadNested(ctx, db, r.Nested, related, relatedRaws); err != nil {
+	if err := loadNested(ctx, db, nested, related, relatedRaws); err != nil {
 		return err
 	}
-	grouped := groupByKey(relatedRaws, r.ForeignKey)
+	grouped := groupByKey(relatedRaws, relatedKey)
 
 	for i := range parents {
-		matches := grouped[keys[i]]
+		matches := matchesFor(keys[i], grouped)
 		children := make([]R, 0, len(matches))
 		for _, j := range matches {
 			children = append(children, related[j])
 		}
-		r.Attach(&parents[i], children)
+		attach(&parents[i], children)
 	}
 	return nil
 }

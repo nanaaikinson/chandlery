@@ -33,8 +33,10 @@
 // BeforeCreate, AfterCreate, BeforeUpdate and AfterUpdate hook the model's
 // own lifecycle; Observe registers the same events outside the model type.
 //
-// Relations (odm.HasMany, odm.HasOne, odm.BelongsTo) are declared explicitly
-// and loaded by Query.With, batched into one query each. Query.CursorPaginate
+// Relations (odm.HasMany, odm.HasOne, odm.BelongsTo, odm.BelongsToMany) are
+// declared explicitly and loaded by Query.With, batched into one query each —
+// including many-to-many, which MongoDB stores as a list of ids rather than
+// a join collection. Query.CursorPaginate
 // pages by seeking rather than skipping. DB.Transaction runs a callback
 // inside a MongoDB transaction, and Collection.SyncIndexes creates whatever
 // a model declares through odm.Indexer.

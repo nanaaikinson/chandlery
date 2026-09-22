@@ -680,6 +680,7 @@ customers, err := customers.With(CustomerOrders).Get(ctx)
 | `HasMany[T, R]`             | on the related model | `[]R`, empty when there are none |
 | `HasOne[T, R]`              | on the related model | `*R`, nil when there is none     |
 | `BelongsTo[T, R]`           | on this model        | `*R`, nil when the key is unset or dangling |
+| `BelongsToMany[T, R]`       | on this model, as a list | `[]R`, empty when there are none |
 
 `ForeignKey` names the field holding the key; `LocalKey` (or `OwnerKey` on
 `BelongsTo`) names what it points at, defaulting to `_id`.
@@ -711,9 +712,52 @@ it, so one exported relation works both plain and nested.
 on field access — reading `customer.Orders` is reading a struct field, never
 a query.
 
-Not here: many-to-many, polymorphic relations and pivot models.
-`Relation[T]`'s methods are unexported, so the three declarations above are
-the whole set.
+#### Many-to-many
+
+MongoDB's answer to a many-to-many is a list of ids on one side, because a
+document can hold one where a relational row cannot. There is no join
+collection in it — the list *is* the relationship:
+
+```go
+type User struct {
+	odm.Model `bson:",inline"`
+
+	RoleIDs []string `bson:"role_ids"`
+	Roles   []Role   `bson:"-"`
+}
+
+var UserRoles = odm.BelongsToMany[User, Role]{
+	LocalKey: "role_ids",
+	Attach:   func(u *User, roles []Role) { u.Roles = roles },
+}
+```
+
+The other direction needs no new declaration. Where the list lives on the
+*related* model, that is a `HasMany` whose foreign key happens to hold an
+array, and it reads it the same way:
+
+```go
+var RoleUsers = odm.HasMany[Role, User]{
+	ForeignKey: "role_ids",
+	Attach:     func(r *Role, users []User) { r.Users = users },
+}
+```
+
+That symmetry is not a special case bolted on: a relation key is read as a
+list of keys, one for a scalar field and one per element for an array, so
+every declaration handles both without knowing which it has. Loading stays
+one query — every id from every parent goes into a single `$in` — and a
+parent listing the same id twice gets the document once.
+
+A join collection carrying its own fields (when a role was granted, and by
+whom) is a different shape. That is a model of its own with two `BelongsTo`
+relations, which needs nothing from this package.
+
+Not here: polymorphic relations. They have no single related type, so
+`Relation[T]` could not name one, `Attach` would take `[]any`, and every
+call site would need a type switch — the one untyped corner in a package
+whose relations are otherwise compile-checked. Two typed relations and a
+branch in your own code reads better.
 
 ### Transactions
 

@@ -3,6 +3,7 @@ package odm
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -92,55 +93,114 @@ func keyOf(value bson.RawValue) keyID {
 	return keyID(append([]byte{byte(value.Type)}, value.Value...))
 }
 
-// documentKeys reads one field out of every document, returning a key per
-// document (empty where the field is absent) and the distinct values to
-// match against, decoded so they can go into an $in.
+// fieldKeys reads one field out of a document and returns the keys it
+// contributes: one for a scalar, one per element for an array.
+//
+// That array case is the whole of many-to-many. MongoDB stores "this user
+// has these roles" as an array of ids on the user, so a relation key is a
+// list as often as it is a single value, and a relation that can only match
+// scalars can only express one side of a graph. Expanding here means every
+// declaration handles both without knowing which it has: user.role_ids to
+// role._id, role._id back to user.role_ids, or arrays on both sides.
+func fieldKeys(raw bson.Raw, field string) ([]bson.RawValue, bool) {
+	value, err := raw.LookupErr(strings.Split(field, ".")...)
+	if err != nil {
+		// A document without the key simply has no related documents.
+		return nil, false
+	}
+
+	if value.Type != bson.TypeArray {
+		return []bson.RawValue{value}, true
+	}
+
+	elements, err := value.Array().Values()
+	if err != nil {
+		return nil, false
+	}
+	return elements, true
+}
+
+// documentKeys reads one field out of every document, returning the keys
+// each one contributes (none where the field is absent, several where it
+// holds an array) and the distinct values to match against, decoded so they
+// can go into an $in.
 //
 // Reading from the raw bytes rather than the decoded model is what keeps
 // this reflection-free: the field is named in the declaration, and the
 // bytes are already there.
-func documentKeys(raws []bson.Raw, field string) ([]keyID, bson.A, error) {
-	keys := make([]keyID, len(raws))
+func documentKeys(raws []bson.Raw, field string) ([][]keyID, bson.A, error) {
+	keys := make([][]keyID, len(raws))
 	values := make(bson.A, 0, len(raws))
 	seen := make(map[keyID]struct{}, len(raws))
 
 	for i, raw := range raws {
-		value, err := raw.LookupErr(strings.Split(field, ".")...)
-		if err != nil {
-			// A document without the key simply has no related documents.
+		elements, ok := fieldKeys(raw, field)
+		if !ok {
 			continue
 		}
 
-		key := keyOf(value)
-		keys[i] = key
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
+		keys[i] = make([]keyID, 0, len(elements))
+		for _, element := range elements {
+			key := keyOf(element)
+			keys[i] = append(keys[i], key)
 
-		var decoded any
-		if err := value.Unmarshal(&decoded); err != nil {
-			return nil, nil, fmt.Errorf("odm: reading relation key %q: %w", field, err)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+
+			var decoded any
+			if err := element.Unmarshal(&decoded); err != nil {
+				return nil, nil, fmt.Errorf("odm: reading relation key %q: %w", field, err)
+			}
+			values = append(values, decoded)
 		}
-		values = append(values, decoded)
 	}
 
 	return keys, values, nil
 }
 
 // groupByKey indexes documents by one field's value, so attaching is a map
-// lookup per parent rather than a scan.
+// lookup per parent rather than a scan. A document whose key field holds an
+// array is indexed under every element, which is what lets the other side of
+// a many-to-many find it.
 func groupByKey(raws []bson.Raw, field string) map[keyID][]int {
 	grouped := make(map[keyID][]int, len(raws))
 	for i, raw := range raws {
-		value, err := raw.LookupErr(strings.Split(field, ".")...)
-		if err != nil {
+		elements, ok := fieldKeys(raw, field)
+		if !ok {
 			continue
 		}
-		key := keyOf(value)
-		grouped[key] = append(grouped[key], i)
+		for _, element := range elements {
+			key := keyOf(element)
+			grouped[key] = append(grouped[key], i)
+		}
 	}
 	return grouped
+}
+
+// matchesFor collects the related documents one parent's keys reach, in the
+// order MongoDB returned them and without repeats — a parent holding the
+// same id twice, or reaching one document by two of its keys, still gets it
+// once.
+func matchesFor(keys []keyID, grouped map[keyID][]int) []int {
+	if len(keys) == 1 {
+		return grouped[keys[0]]
+	}
+
+	var matches []int
+	seen := map[int]struct{}{}
+	for _, key := range keys {
+		for _, index := range grouped[key] {
+			if _, ok := seen[index]; ok {
+				continue
+			}
+			seen[index] = struct{}{}
+			matches = append(matches, index)
+		}
+	}
+	slices.Sort(matches)
+	return matches
 }
 
 // relatedDocuments fetches everything whose field matches one of values,
@@ -178,7 +238,7 @@ func validateNested[R any](kind string, nested []Relation[R]) error {
 
 // relationKeys is the shared first half of every relation's load: read the
 // keys off the parents, and bail out when there is nothing to match.
-func relationKeys(raws []bson.Raw, field string) ([]keyID, bson.A, bool, error) {
+func relationKeys(raws []bson.Raw, field string) ([][]keyID, bson.A, bool, error) {
 	keys, values, err := documentKeys(raws, field)
 	if err != nil {
 		return nil, nil, false, err

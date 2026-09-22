@@ -1,6 +1,6 @@
 module github.com/nanaaikinson/chandlery
 
-go 1.26.3
+go 1.27.0
 
 require (
 	github.com/Oudwins/zog v0.23.0

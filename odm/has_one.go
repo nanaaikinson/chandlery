@@ -67,9 +67,9 @@ func (r HasOne[T, R]) load(ctx context.Context, db *DB, parents []T, raws []bson
 }
 
 // attachFirst hands each parent the first document matching its key, or nil.
-func attachFirst[T, R any](parents []T, keys []keyID, related []R, grouped map[keyID][]int, attach func(*T, *R)) {
+func attachFirst[T, R any](parents []T, keys [][]keyID, related []R, grouped map[keyID][]int, attach func(*T, *R)) {
 	for i := range parents {
-		matches := grouped[keys[i]]
+		matches := matchesFor(keys[i], grouped)
 		if len(matches) == 0 {
 			attach(&parents[i], nil)
 			continue

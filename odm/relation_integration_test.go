@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sort"
 	"sync"
 	"testing"
 
@@ -21,10 +22,14 @@ type customer struct {
 	odm.Model `bson:",inline"`
 
 	Name string `bson:"name"`
+	// The ids of the roles this customer holds: MongoDB's usual shape for a
+	// many-to-many, with no join collection in sight.
+	RoleIDs []string `bson:"role_ids"`
 
 	// Loaded, not stored — see the bson:"-" test below.
 	Orders  []purchase `bson:"-"`
 	Profile *profile   `bson:"-"`
+	Roles   []role     `bson:"-"`
 }
 
 func (customer) CollectionName() string { return "customers" }
@@ -40,6 +45,16 @@ type purchase struct {
 }
 
 func (purchase) CollectionName() string { return "purchases" }
+
+type role struct {
+	odm.Model `bson:",inline"`
+
+	Name string `bson:"name"`
+
+	Members []customer `bson:"-"`
+}
+
+func (role) CollectionName() string { return "roles" }
 
 type payment struct {
 	odm.Model `bson:",inline"`
@@ -76,6 +91,17 @@ var (
 		ForeignKey: "purchase_id",
 		Attach:     func(p *purchase, payments []payment) { p.Payments = payments },
 	}
+	// The two directions of one many-to-many. Only the first needs a
+	// declaration of its own; the second is a HasMany whose foreign key
+	// happens to hold an array.
+	customerRoles = odm.BelongsToMany[customer, role]{
+		LocalKey: "role_ids",
+		Attach:   func(c *customer, roles []role) { c.Roles = roles },
+	}
+	roleCustomers = odm.HasMany[role, customer]{
+		ForeignKey: "role_ids",
+		Attach:     func(r *role, members []customer) { r.Members = members },
+	}
 )
 
 // shop wires the three collections onto one database.
@@ -84,6 +110,7 @@ type shop struct {
 	purchases *odm.Collection[purchase]
 	profiles  *odm.Collection[profile]
 	payments  *odm.Collection[payment]
+	roles     *odm.Collection[role]
 }
 
 func newShop(t *testing.T) shop {
@@ -100,6 +127,7 @@ func shopOn(t *testing.T, database *odm.DB) shop {
 		purchases: odm.Use[purchase](database),
 		profiles:  odm.Use[profile](database),
 		payments:  odm.Use[payment](database),
+		roles:     odm.Use[role](database),
 	}
 }
 
@@ -444,11 +472,18 @@ func TestRelationFieldsAreNotStored(t *testing.T) {
 	if err := s.customers.Raw().FindOne(ctx, bson.M{"_id": reloaded.ID}).Decode(&stored); err != nil {
 		t.Fatalf("FindOne() error = %v", err)
 	}
-	if _, ok := stored["Orders"]; ok {
-		t.Error("the stored document carries an Orders field, want the relation left out")
+	// Name the keys rather than count them: when a real field is added to
+	// the model this should say which one appeared, not just that the total
+	// moved.
+	keys := make([]string, 0, len(stored))
+	for key := range stored {
+		keys = append(keys, key)
 	}
-	if len(stored) != 4 {
-		t.Errorf("stored document = %v, want only _id, name and the timestamps", stored)
+	sort.Strings(keys)
+
+	want := []string{"_id", "created_at", "name", "role_ids", "updated_at"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Errorf("stored keys = %v, want %v — the loaded relations must not be among them", keys, want)
 	}
 }
 
@@ -569,4 +604,189 @@ func TestNestedRelationLeavesTheDeclarationAlone(t *testing.T) {
 	if plain.Orders[0].Payments != nil {
 		t.Errorf("payments = %v, want none — the plain declaration must not have picked up the nesting", plain.Orders[0].Payments)
 	}
+}
+
+func customerNames(customers []customer) []string {
+	out := make([]string, len(customers))
+	for i, c := range customers {
+		out[i] = c.Name
+	}
+	return out
+}
+
+func roleNames(roles []role) []string {
+	out := make([]string, len(roles))
+	for i, r := range roles {
+		out[i] = r.Name
+	}
+	return out
+}
+
+func TestManyToMany(t *testing.T) {
+	t.Parallel()
+
+	// One array of ids, read from both ends.
+	setup := func(t *testing.T) (shop, *role, *role) {
+		t.Helper()
+
+		s := newShop(t)
+		admin := &role{Name: "admin"}
+		member := &role{Name: "member"}
+		create(t, s.roles, admin, member)
+
+		create(t, s.customers,
+			&customer{Name: "both", RoleIDs: []string{admin.ID, member.ID}},
+			&customer{Name: "member-only", RoleIDs: []string{member.ID}},
+			&customer{Name: "none"},
+		)
+		return s, admin, member
+	}
+
+	t.Run("loads the related documents a parent lists", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.Background()
+		s, _, _ := setup(t)
+
+		got, err := s.customers.With(customerRoles).OrderBy("name", odm.Asc).Get(ctx)
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+
+		byName := map[string][]string{}
+		for _, c := range got {
+			byName[c.Name] = roleNames(c.Roles)
+		}
+		if want := []string{"admin", "member"}; !reflect.DeepEqual(byName["both"], want) {
+			t.Errorf("both's roles = %v, want %v", byName["both"], want)
+		}
+		if want := []string{"member"}; !reflect.DeepEqual(byName["member-only"], want) {
+			t.Errorf("member-only's roles = %v, want %v", byName["member-only"], want)
+		}
+		if got := byName["none"]; len(got) != 0 {
+			t.Errorf("none's roles = %v, want none", got)
+		}
+	})
+
+	t.Run("loads the same relationship from the other end", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.Background()
+		s, _, _ := setup(t)
+
+		got, err := s.roles.With(roleCustomers).OrderBy("name", odm.Asc).Get(ctx)
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+
+		byName := map[string][]string{}
+		for _, r := range got {
+			byName[r.Name] = customerNames(r.Members)
+		}
+		if want := []string{"both"}; !reflect.DeepEqual(byName["admin"], want) {
+			t.Errorf("admin's members = %v, want %v", byName["admin"], want)
+		}
+		// Both customers hold this one, which is the whole point of a
+		// many-to-many.
+		if want := []string{"both", "member-only"}; !reflect.DeepEqual(byName["member"], want) {
+			t.Errorf("member's members = %v, want %v", byName["member"], want)
+		}
+	})
+
+	t.Run("a repeated id yields one document", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.Background()
+		s := newShop(t)
+		admin := &role{Name: "admin"}
+		create(t, s.roles, admin)
+		create(t, s.customers, &customer{Name: "twice", RoleIDs: []string{admin.ID, admin.ID}})
+
+		got, err := s.customers.With(customerRoles).First(ctx)
+		if err != nil {
+			t.Fatalf("First() error = %v", err)
+		}
+		if want := []string{"admin"}; !reflect.DeepEqual(roleNames(got.Roles), want) {
+			t.Errorf("roles = %v, want %v", roleNames(got.Roles), want)
+		}
+	})
+
+	t.Run("an empty list loads nothing and is not nil", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.Background()
+		s := newShop(t)
+		create(t, s.customers, &customer{Name: "none", RoleIDs: []string{}})
+
+		got, err := s.customers.With(customerRoles).First(ctx)
+		if err != nil {
+			t.Fatalf("First() error = %v", err)
+		}
+		if got.Roles == nil {
+			t.Error("Roles = nil, want an empty slice")
+		}
+		if len(got.Roles) != 0 {
+			t.Errorf("Roles = %v, want none", got.Roles)
+		}
+	})
+
+	t.Run("stays one query per side", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.Background()
+
+		var mu sync.Mutex
+		finds := map[string]int{}
+		monitor := &event.CommandMonitor{
+			Started: func(_ context.Context, e *event.CommandStartedEvent) {
+				if e.CommandName != "find" {
+					return
+				}
+				if collection, ok := e.Command.Lookup("find").StringValueOK(); ok {
+					mu.Lock()
+					finds[collection]++
+					mu.Unlock()
+				}
+			},
+		}
+
+		watched, err := mongo.Connect(options.Client().ApplyURI(primaryURI).SetMonitor(monitor))
+		if err != nil {
+			t.Fatalf("Connect() error = %v", err)
+		}
+		t.Cleanup(func() { watched.Disconnect(context.Background()) })
+
+		s := shopOn(t, odm.New(testDatabase(t, watched)))
+		admin := &role{Name: "admin"}
+		member := &role{Name: "member"}
+		create(t, s.roles, admin, member)
+		for i := range 10 {
+			create(t, s.customers, &customer{
+				Name:    string(rune('a' + i)),
+				RoleIDs: []string{admin.ID, member.ID},
+			})
+		}
+
+		mu.Lock()
+		finds = map[string]int{}
+		mu.Unlock()
+
+		got, err := s.customers.With(customerRoles).Get(ctx)
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		for _, c := range got {
+			if len(c.Roles) != 2 {
+				t.Fatalf("%q has %d roles, want 2", c.Name, len(c.Roles))
+			}
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		// Every id from every customer goes into one $in, however many
+		// customers there are and however many ids each holds.
+		if finds["customers"] != 1 || finds["roles"] != 1 {
+			t.Errorf("find commands = %v, want one per collection over 10 customers", finds)
+		}
+	})
 }
