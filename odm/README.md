@@ -12,6 +12,9 @@ something the builder doesn't cover.
 This package is independent of [`db`](../db): the two share no types and
 neither imports the other.
 
+**New here? Read [GUIDE.md](GUIDE.md)** — every feature worked through one
+application, in the order you'd meet it. This file is the reference.
+
 ```
 go get github.com/nanaaikinson/chandlery
 ```

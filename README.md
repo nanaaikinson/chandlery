@@ -36,7 +36,7 @@ Requires Go 1.26.3+.
   pagination, batched eager loading, transactions and index declarations —
   and the driver's own types never more than a `Raw()` away. Needs MongoDB
   8.0+. Independent of `db`: the two share no types and neither imports the
-  other.
+  other. Start with its [guide](odm/GUIDE.md).
 - [`storage`](storage) — a driver-agnostic `Disk` contract mirroring
   Laravel's `Storage::disk()` (`Put`/`Get`, `Copy`/`Move`, `Url`/
   `TemporaryUrl`/`PresignedPutUrl`, directory listing, ...), with backends

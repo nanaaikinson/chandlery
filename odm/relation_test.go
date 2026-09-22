@@ -58,9 +58,9 @@ func TestDocumentKeys(t *testing.T) {
 			t.Fatalf("documentKeys() error = %v", err)
 		}
 		if len(keys) != 3 {
-			t.Fatalf("keys = %d, want one per document", len(keys))
+			t.Fatalf("keys = %d, want one entry per document", len(keys))
 		}
-		if keys[0] != keys[2] || keys[0] == keys[1] {
+		if !reflect.DeepEqual(keys[0], keys[2]) || reflect.DeepEqual(keys[0], keys[1]) {
 			t.Error("keys do not identify equal and differing values")
 		}
 		// The repeated "a" is matched once, not twice.
@@ -78,8 +78,8 @@ func TestDocumentKeys(t *testing.T) {
 		if err != nil {
 			t.Fatalf("documentKeys() error = %v", err)
 		}
-		if keys[1] != "" {
-			t.Errorf("keys[1] = %q, want the empty key for a missing field", keys[1])
+		if len(keys[1]) != 0 {
+			t.Errorf("keys[1] = %v, want no keys for a document missing the field", keys[1])
 		}
 		if len(values) != 1 {
 			t.Errorf("values = %v, want only the one present key", values)
@@ -366,6 +366,166 @@ func TestNestedRelations(t *testing.T) {
 		}
 		if err := belongsTo.validate(); err != nil {
 			t.Errorf("BelongsTo validate() = %v, want nil", err)
+		}
+	})
+}
+
+func TestArrayValuedKeys(t *testing.T) {
+	t.Parallel()
+
+	t.Run("expands an array field into one key per element", func(t *testing.T) {
+		t.Parallel()
+
+		raws := rawDocs(t,
+			bson.M{"_id": "u1", "role_ids": bson.A{"r1", "r2"}},
+			bson.M{"_id": "u2", "role_ids": bson.A{"r2"}},
+		)
+
+		keys, values, err := documentKeys(raws, "role_ids")
+		if err != nil {
+			t.Fatalf("documentKeys() error = %v", err)
+		}
+		if len(keys[0]) != 2 || len(keys[1]) != 1 {
+			t.Errorf("key counts = %d and %d, want 2 and 1", len(keys[0]), len(keys[1]))
+		}
+		// r2 is shared, and goes into the $in once.
+		if want := (bson.A{"r1", "r2"}); !reflect.DeepEqual(values, want) {
+			t.Errorf("values = %v, want %v — flat elements, each once", values, want)
+		}
+	})
+
+	t.Run("an empty array contributes no keys", func(t *testing.T) {
+		t.Parallel()
+
+		raws := rawDocs(t, bson.M{"_id": "u1", "role_ids": bson.A{}})
+
+		keys, values, err := documentKeys(raws, "role_ids")
+		if err != nil {
+			t.Fatalf("documentKeys() error = %v", err)
+		}
+		if len(keys[0]) != 0 || len(values) != 0 {
+			t.Errorf("keys/values = %v/%v, want none", keys[0], values)
+		}
+	})
+
+	t.Run("indexes a document under every element of its array", func(t *testing.T) {
+		t.Parallel()
+
+		raws := rawDocs(t,
+			bson.M{"_id": "u1", "role_ids": bson.A{"r1", "r2"}},
+			bson.M{"_id": "u2", "role_ids": bson.A{"r2"}},
+		)
+
+		grouped := groupByKey(raws, "role_ids")
+		if len(grouped) != 2 {
+			t.Fatalf("grouped into %d keys, want 2", len(grouped))
+		}
+
+		roles := rawDocs(t, bson.M{"_id": "r1"}, bson.M{"_id": "r2"})
+		r1 := keyOf(roles[0].Lookup("_id"))
+		r2 := keyOf(roles[1].Lookup("_id"))
+
+		if want := []int{0}; !reflect.DeepEqual(grouped[r1], want) {
+			t.Errorf("grouped[r1] = %v, want %v", grouped[r1], want)
+		}
+		if want := []int{0, 1}; !reflect.DeepEqual(grouped[r2], want) {
+			t.Errorf("grouped[r2] = %v, want %v — both users hold r2", grouped[r2], want)
+		}
+	})
+
+	t.Run("an array key matches a scalar key on the other side", func(t *testing.T) {
+		t.Parallel()
+
+		// The claim the whole feature rests on: a key read from an array
+		// element is the same key as one read from a scalar field.
+		users := rawDocs(t, bson.M{"_id": "u1", "role_ids": bson.A{"r1"}})
+		roles := rawDocs(t, bson.M{"_id": "r1"})
+
+		keys, _, err := documentKeys(users, "role_ids")
+		if err != nil {
+			t.Fatalf("documentKeys() error = %v", err)
+		}
+		grouped := groupByKey(roles, "_id")
+
+		if len(matchesFor(keys[0], grouped)) != 1 {
+			t.Error("an array element did not match the scalar _id it names")
+		}
+	})
+}
+
+func TestMatchesFor(t *testing.T) {
+	t.Parallel()
+
+	grouped := map[keyID][]int{"a": {0, 2}, "b": {2, 3}}
+
+	t.Run("a single key reads straight through", func(t *testing.T) {
+		t.Parallel()
+
+		if want := []int{0, 2}; !reflect.DeepEqual(matchesFor([]keyID{"a"}, grouped), want) {
+			t.Errorf("matchesFor() = %v, want %v", matchesFor([]keyID{"a"}, grouped), want)
+		}
+	})
+
+	t.Run("several keys merge without repeating a document", func(t *testing.T) {
+		t.Parallel()
+
+		// 2 is reachable by both keys, and should still appear once.
+		got := matchesFor([]keyID{"a", "b"}, grouped)
+		if want := []int{0, 2, 3}; !reflect.DeepEqual(got, want) {
+			t.Errorf("matchesFor() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a repeated key does not repeat its documents", func(t *testing.T) {
+		t.Parallel()
+
+		got := matchesFor([]keyID{"a", "a"}, grouped)
+		if want := []int{0, 2}; !reflect.DeepEqual(got, want) {
+			t.Errorf("matchesFor() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("no keys match nothing", func(t *testing.T) {
+		t.Parallel()
+
+		if got := matchesFor(nil, grouped); len(got) != 0 {
+			t.Errorf("matchesFor(nil) = %v, want none", got)
+		}
+	})
+}
+
+func TestBelongsToManyValidation(t *testing.T) {
+	t.Parallel()
+
+	attach := func(*User, []order) {}
+
+	t.Run("needs the field holding the ids", func(t *testing.T) {
+		t.Parallel()
+
+		err := BelongsToMany[User, order]{Attach: attach}.validate()
+		if err == nil || !strings.Contains(err.Error(), "LocalKey") {
+			t.Errorf("validate() = %v, want it to name LocalKey", err)
+		}
+	})
+
+	t.Run("needs somewhere to attach", func(t *testing.T) {
+		t.Parallel()
+
+		err := BelongsToMany[User, order]{LocalKey: "order_ids"}.validate()
+		if err == nil || !strings.Contains(err.Error(), "Attach") {
+			t.Errorf("validate() = %v, want it to name Attach", err)
+		}
+	})
+
+	t.Run("a complete declaration validates and nests", func(t *testing.T) {
+		t.Parallel()
+
+		relation := BelongsToMany[User, order]{LocalKey: "order_ids", Attach: attach}
+		if err := relation.validate(); err != nil {
+			t.Errorf("validate() = %v, want nil", err)
+		}
+		if len(relation.With().Nested) != 0 {
+			t.Error("With() with no arguments added a nested relation")
 		}
 	})
 }
