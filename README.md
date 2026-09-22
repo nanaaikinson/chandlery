@@ -52,6 +52,24 @@ where noted (the `respond` adapters depend on `respond`'s core, and the
 
 Early — API may still shift before v1.
 
+## Releasing
+
+A release is a tag. Pushing one runs the full suite — including the
+Docker-backed integration tests — and publishes a GitHub release with
+generated notes:
+
+```bash
+git tag -a v0.4.0 -m "v0.4.0" && git push origin v0.4.0
+```
+
+The workflow refuses a tag Go can't use: it must be `vMAJOR.MINOR.PATCH`
+(`0.4.0` without the `v` resolves for nobody), and from v2 on the major
+version has to be in the module path too — tagging `v2.0.0` without renaming
+the module to `.../v2` publishes a version nothing can import. A published
+version is immutable, so both are cheaper to catch before the tag than after.
+
+A tag with a hyphen (`v0.4.0-rc.1`) is published as a prerelease.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

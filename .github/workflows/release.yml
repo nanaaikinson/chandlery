@@ -1,0 +1,103 @@
+name: Release
+
+# Releases are cut by pushing a tag. Nothing here creates one: the tag is the
+# decision, and this reacts to it.
+#
+#   git tag -a v0.4.0 -m "v0.4.0" && git push origin v0.4.0
+on:
+  push:
+    tags: ["v*"]
+
+# Read-only by default; only the job that publishes asks for more.
+permissions:
+  contents: read
+
+jobs:
+  # A tag gets the full suite, integration included. A release is the one
+  # artefact nobody can quietly re-run, so it is worth the extra minute.
+  verify:
+    name: verify
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: publish
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history, so the generated notes can see what came before.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Two ways a Go library's tag can be wrong in a way that is painful to
+      # undo, both cheap to catch here.
+      - name: Check the tag
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+
+          # 1. Go's module system requires semver with a leading v. A tag
+          #    like 0.4.0 or v0.4 resolves for nobody, and the only fix is a
+          #    new tag, because a published version is immutable.
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::$tag is not a Go semver tag — expected vMAJOR.MINOR.PATCH, e.g. v0.4.0"
+            exit 1
+          fi
+
+          # 2. From v2 on, the major version has to be in the module path
+          #    itself. Tagging v2.0.0 without renaming the module publishes a
+          #    version nothing can import.
+          major="${tag#v}"; major="${major%%.*}"
+          module="$(go list -m)"
+          if [ "$major" -ge 2 ] && [ "${module##*/}" != "v$major" ]; then
+            echo "::error::$tag is a v$major release but the module is $module — it must end in /v$major (see https://go.dev/ref/mod#major-version-suffixes)"
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_ENV"
+          echo "module=$module" >> "$GITHUB_ENV"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Anything with a hyphen is a prerelease: v0.4.0-rc.1, v1.0.0-beta.
+          prerelease=""
+          case "$tag" in
+            *-*) prerelease="--prerelease" ;;
+          esac
+
+          # --verify-tag so a mistyped ref fails here rather than creating a
+          # release pointing at nothing.
+          gh release create "$tag" \
+            --title "$tag" \
+            --generate-notes \
+            --verify-tag \
+            $prerelease
+
+      # Ask the module proxy to fetch the new version now, so `go get` and
+      # pkg.go.dev work immediately instead of on whoever asks first. Best
+      # effort: the release is already published, and a cold proxy is a delay
+      # rather than a failure.
+      - name: Warm the module proxy
+        continue-on-error: true
+        env:
+          GOPROXY: proxy.golang.org
+          GOFLAGS: -mod=mod
+        run: |
+          for attempt in 1 2 3; do
+            if go list -m "$module@$tag"; then
+              exit 0
+            fi
+            echo "proxy has not seen $tag yet (attempt $attempt); waiting"
+            sleep 15
+          done
+          echo "::warning::the module proxy has not picked up $tag yet — it will on first request"

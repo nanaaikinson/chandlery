@@ -29,7 +29,7 @@ pull-images:
 	@printf '%s\n' \
 		postgres:16-alpine \
 		redis:7-alpine \
-		quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z \
+		quay.io/minio/minio:RELEASE.2024-01-16T16-07-38Z \
 		mongo:8 \
 		testcontainers/ryuk:0.14.0 \
 		| xargs -P 5 -n 1 -I{} sh -c 'docker pull --quiet {} || echo "pull-images: skipped {}" >&2' 

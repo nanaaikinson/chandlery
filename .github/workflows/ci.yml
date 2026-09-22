@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Called by release.yml, so a tag is held to exactly the same bar as a
+  # pull request rather than to a copy of it that can drift.
+  workflow_call:
 
 jobs:
   test:
