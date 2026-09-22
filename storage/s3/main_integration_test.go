@@ -22,7 +22,11 @@ func TestMain(m *testing.M) {
 func run(m *testing.M) int {
 	ctx := context.Background()
 
-	container, err := tcminio.Run(ctx, "minio/minio:RELEASE.2024-01-16T16-07-38Z")
+	// quay.io, not Docker Hub: MinIO withdrew the minio/minio repository
+	// from Docker Hub, so the old pin stopped resolving — "pull access
+	// denied ... repository does not exist" — for everyone at once, with no
+	// change on our side. quay.io is where MinIO publishes now.
+	container, err := tcminio.Run(ctx, "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "starting minio container:", err)
 		return 1

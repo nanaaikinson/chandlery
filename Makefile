@@ -17,14 +17,19 @@ test-integration:
 # on a 2-core CI runner that is most of the wall clock.
 #
 # The list is a convenience, not a contract, so a pull that fails is a
-# warning rather than an error: an image missing here — drifted from the
-# test files, or a registry having a bad day — is still pulled by
-# testcontainers on demand. This target only ever saves time.
+# warning rather than an error: an image missing here — drifted from the test
+# files, withdrawn upstream, or behind a registry having a bad day — is still
+# attempted by testcontainers on demand, and it is the test that should report
+# a genuinely unavailable image, not this. Pre-pulling only ever saves time.
+#
+# Withdrawal is not hypothetical: MinIO removed minio/minio from Docker Hub,
+# which broke storage/s3 with "repository does not exist" and no change on our
+# side. Hence quay.io below.
 pull-images:
 	@printf '%s\n' \
 		postgres:16-alpine \
 		redis:7-alpine \
-		minio/minio:RELEASE.2024-01-16T16-07-38Z \
+		quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z \
 		mongo:8 \
 		testcontainers/ryuk:0.14.0 \
 		| xargs -P 5 -n 1 -I{} sh -c 'docker pull --quiet {} || echo "pull-images: skipped {}" >&2' 
