@@ -7,7 +7,7 @@ no framework lock-in. Import only what you need.
 go get github.com/nanaaikinson/chandlery
 ```
 
-Requires Go 1.26.3+.
+Requires Go 1.27.0+.
 
 ## Packages
 

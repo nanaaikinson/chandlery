@@ -19,7 +19,7 @@ application, in the order you'd meet it. This file is the reference.
 go get github.com/nanaaikinson/chandlery
 ```
 
-Requires Go 1.26.3+, [mongo-driver/v2](https://go.mongodb.org/mongo-driver/v2),
+Requires Go 1.27.0+, [mongo-driver/v2](https://go.mongodb.org/mongo-driver/v2),
 and **MongoDB 8.0 or later** — a sorted `UpdateOne` hands its sort to the
 server, and earlier versions reject the field.
 
