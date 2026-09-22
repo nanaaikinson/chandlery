@@ -256,6 +256,59 @@ func TestSave(t *testing.T) {
 		}
 	})
 
+	t.Run("reports what it wrote through WasChanged", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.Background()
+		articles := newArticles(t)
+
+		model := &article{Title: "first", Subtitle: "a subtitle"}
+		if err := articles.Save(ctx, model); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+		if odm.WasChanged(model) {
+			t.Error("WasChanged() = true straight after an insert")
+		}
+
+		model.Title = "second"
+		model.Subtitle = ""
+		if err := articles.Save(ctx, model); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+
+		if !odm.WasChanged(model, "title") {
+			t.Error(`WasChanged("title") = false for the field that was set`)
+		}
+		if !odm.WasChanged(model, "subtitle") {
+			t.Error(`WasChanged("subtitle") = false for the field that was unset`)
+		}
+		if !odm.WasChanged(model, "updated_at") {
+			t.Error(`WasChanged("updated_at") = false, want the automatic stamp counted`)
+		}
+		if odm.WasChanged(model, "views") {
+			t.Error(`WasChanged("views") = true for a field nothing touched`)
+		}
+
+		// The model is clean again, but what the last write did is still
+		// on record.
+		dirty, err := odm.IsDirty(model)
+		if err != nil {
+			t.Fatalf("IsDirty() error = %v", err)
+		}
+		if dirty {
+			t.Error("IsDirty() = true after a successful save")
+		}
+
+		// A save with nothing to do performs no write, so it leaves the
+		// record of the last one alone.
+		if err := articles.Save(ctx, model); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+		if !odm.WasChanged(model, "title") {
+			t.Error(`WasChanged("title") = false after a no-op save, want the previous write still reported`)
+		}
+	})
+
 	t.Run("runs the update hooks and writes what they changed", func(t *testing.T) {
 		t.Parallel()
 

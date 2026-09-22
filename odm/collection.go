@@ -239,7 +239,9 @@ func (c *Collection[T]) insert(ctx context.Context, model *T) error {
 	}
 
 	// The model now agrees with the database, so a later Save sees an
-	// update with nothing changed rather than a second insert.
+	// update with nothing changed rather than a second insert. Nothing was
+	// "changed" by an insert, so WasChanged starts out false.
+	recordWrite(model, Changeset{})
 	if err := snapshot(model); err != nil {
 		return err
 	}

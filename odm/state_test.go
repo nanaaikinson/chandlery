@@ -269,3 +269,94 @@ func TestDiffSkipsUnknownDocumentFields(t *testing.T) {
 		t.Errorf("set = %v, want only the changed field", set)
 	}
 }
+
+func TestWasChanged(t *testing.T) {
+	t.Parallel()
+
+	// WasChanged reads the record a Save leaves behind, so these drive that
+	// record directly — Save itself is covered by the integration suite.
+	written := func(t *testing.T, changes Changeset) *tracked {
+		t.Helper()
+
+		model := newTracked(t, &tracked{Name: "Nana", Nickname: "NK"})
+		recordWrite(model, changes)
+		return model
+	}
+
+	t.Run("false before anything was saved", func(t *testing.T) {
+		t.Parallel()
+
+		model := newTracked(t, &tracked{Name: "Nana"})
+		if WasChanged(model) {
+			t.Error("WasChanged() = true for a model that has never been saved")
+		}
+	})
+
+	t.Run("reports the fields the write set", func(t *testing.T) {
+		t.Parallel()
+
+		model := written(t, Changeset{Set: bson.M{"name": "Nana Kwesi"}})
+		if !WasChanged(model) {
+			t.Error("WasChanged() = false after a write")
+		}
+		if !WasChanged(model, "name") {
+			t.Error(`WasChanged("name") = false for the field that was written`)
+		}
+		if WasChanged(model, "nickname") {
+			t.Error(`WasChanged("nickname") = true for a field the write left alone`)
+		}
+		if !WasChanged(model, "nickname", "name") {
+			t.Error("WasChanged() = false when one of several fields was written")
+		}
+	})
+
+	t.Run("reports the fields the write removed", func(t *testing.T) {
+		t.Parallel()
+
+		model := written(t, Changeset{Unset: []string{"nickname"}})
+		if !WasChanged(model, "nickname") {
+			t.Error(`WasChanged("nickname") = false after the field was unset`)
+		}
+	})
+
+	t.Run("an insert reports nothing changed", func(t *testing.T) {
+		t.Parallel()
+
+		// A new document changed no field; it created them all.
+		model := written(t, Changeset{})
+		if WasChanged(model) {
+			t.Error("WasChanged() = true after an insert")
+		}
+	})
+
+	t.Run("an untracked model is never changed", func(t *testing.T) {
+		t.Parallel()
+
+		if WasChanged(&plainDoc{ID: "a", Name: "Nana"}) {
+			t.Error("WasChanged() = true for a model that keeps no state")
+		}
+	})
+
+	t.Run("is independent of IsDirty", func(t *testing.T) {
+		t.Parallel()
+
+		// Past tense and present tense: the last write set name, and since
+		// then the caller has touched nickname instead.
+		model := written(t, Changeset{Set: bson.M{"name": "Nana Kwesi"}})
+		model.Nickname = "NK2"
+
+		dirty, err := IsDirty(model, "nickname")
+		if err != nil {
+			t.Fatalf("IsDirty() error = %v", err)
+		}
+		if !dirty {
+			t.Error(`IsDirty("nickname") = false after an unsaved change`)
+		}
+		if WasChanged(model, "nickname") {
+			t.Error(`WasChanged("nickname") = true for a change that has not been written`)
+		}
+		if !WasChanged(model, "name") {
+			t.Error(`WasChanged("name") = false for the field the last write set`)
+		}
+	})
+}

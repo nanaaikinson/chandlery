@@ -24,6 +24,11 @@ type modelState struct {
 	// field the document carries and T does not can never appear on either
 	// side, so Save can never unset it.
 	original bson.Raw
+	// written is what the last Save actually sent, kept after the snapshot
+	// is refreshed so WasChanged can still answer. A Save that found
+	// nothing to do leaves it alone: it describes the last write, and a
+	// no-op is not one.
+	written Changeset
 }
 
 // stateful is implemented only by *IdentityModel, and so by anything
@@ -60,6 +65,13 @@ func snapshot[T any](model *T) error {
 	state.exists = true
 	state.original = raw
 	return nil
+}
+
+// recordWrite remembers what a Save sent, for WasChanged to report.
+func recordWrite[T any](model *T, changes Changeset) {
+	if state, ok := stateOf(model); ok {
+		state.written = changes
+	}
 }
 
 // IsPersisted reports whether model came from the database — hydrated by a
@@ -117,6 +129,51 @@ func changesOf[T any](model *T) (bson.Raw, Changeset, error) {
 	return current, Changeset{Set: set, Unset: unset}, err
 }
 
+// WasChanged reports what the model's last Save wrote — the past-tense
+// counterpart to IsDirty, for after the write rather than before it:
+//
+//	if err := users.Save(ctx, &user); err != nil {
+//		return err
+//	}
+//	if odm.WasChanged(&user, "email") {
+//		// the address on file is new; send a confirmation
+//	}
+//
+// Given field names it asks only about those. It describes the most recent
+// write, so a Save that found nothing to do doesn't change the answer, and
+// an insert reports nothing changed — a new document changed no field, it
+// created them all. Before any Save it is false.
+//
+// Note that Original moves on: once a Save succeeds the snapshot is the
+// value just written, so read the old value before saving, not after.
+func WasChanged[T any](model *T, fields ...string) bool {
+	state, ok := stateOf(model)
+	if !ok {
+		return false
+	}
+	return state.written.touches(fields...)
+}
+
+// touches reports whether a changeset wrote anything, or wrote any of the
+// named fields.
+func (c Changeset) touches(fields ...string) bool {
+	if len(fields) == 0 {
+		return len(c.Set) > 0 || len(c.Unset) > 0
+	}
+
+	for _, field := range fields {
+		if _, ok := c.Set[field]; ok {
+			return true
+		}
+		for _, removed := range c.Unset {
+			if removed == field {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // IsDirty reports whether the model differs from its snapshot. Given field
 // names it asks only about those, which is the common case in a hook:
 // "did the email change?"
@@ -125,22 +182,7 @@ func IsDirty[T any](model *T, fields ...string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-
-	if len(fields) == 0 {
-		return len(changes.Set) > 0 || len(changes.Unset) > 0, nil
-	}
-
-	for _, field := range fields {
-		if _, ok := changes.Set[field]; ok {
-			return true, nil
-		}
-		for _, removed := range changes.Unset {
-			if removed == field {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
+	return changes.touches(fields...), nil
 }
 
 // Original returns a field's value as it was when the model was last in
@@ -305,6 +347,8 @@ func (c *Collection[T]) update(ctx context.Context, model *T) error {
 		return classify(err)
 	}
 
+	recordWrite(model, changes)
+
 	if err := runAfterUpdate(ctx, model); err != nil {
 		return err
 	}
@@ -312,7 +356,7 @@ func (c *Collection[T]) update(ctx context.Context, model *T) error {
 		return err
 	}
 
-	// Last, so everything above still sees what changed.
+	// Last, so everything above still sees what changed through Changes.
 	return snapshot(model)
 }
 

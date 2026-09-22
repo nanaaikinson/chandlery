@@ -578,6 +578,7 @@ odm.IsDirty(&user)                   // anything changed?
 odm.IsDirty(&user, "email")          // that field in particular?
 odm.Changes(&user)                   // (odm.Changeset, error)
 odm.Original(&user, "email")         // the value before the change
+odm.WasChanged(&user, "email")       // did the last Save write it?
 ```
 
 `Changeset` holds `Set` (a `bson.M` of each changed field's current value)
@@ -605,9 +606,23 @@ is nowhere else to keep it. For anything else, `Create` and a query-level
 `Update` do the same job explicitly. Models decoded by `Aggregate` are not
 tracked either — a grouped row is not a document.
 
-There is no `WasChanged`: it would need a second snapshot kept past the
-write, and reading `Changes` inside an `Updating` observer covers what it is
-actually for.
+`IsDirty` and `WasChanged` are the same question in two tenses: what is
+still unwritten, and what the last write did. `WasChanged` is what you want
+after a `Save`, since by then `Changes` is empty and `Original` has moved on
+to the value just written:
+
+```go
+if err := users.Save(ctx, &user); err != nil {
+	return err
+}
+if odm.WasChanged(&user, "email") {
+	// the address on file is new; send a confirmation
+}
+```
+
+It describes the most recent write, so a `Save` that found nothing to do
+doesn't change the answer, and an insert reports nothing changed — a new
+document changed no field, it created them all.
 
 ### Observers
 
@@ -806,11 +821,30 @@ starts one container to do it: MongoDB 8 as a replica set, because
 transactions need one and it is closer to what anything using this package
 runs against anyway.
 
-There is no conformance suite here, unlike [`cache`](../cache) and
-[`storage`](../storage). Those hold several backends to one interface and
-need a shared contract to test them against; this package has one
-implementation of one thing, so a conformance suite would have nothing to
-conform.
+### Checking your own models
+
+`odm.TestConformance` holds a model you wrote to what this package expects:
+
+```go
+func TestUserModel(t *testing.T) {
+	odm.TestConformance(t, odm.Use[User](database), func() *User {
+		return &User{Name: "Nana", Email: "nana@example.com"}
+	})
+}
+```
+
+[`cache`](../cache) and [`storage`](../storage) export a suite of the same
+name for the opposite reason — they hold several backends to one interface.
+There is only one ODM here, so the useful question isn't whether it behaves
+but whether a model wires into it correctly. The mistakes it catches are the
+quiet ones: an embedded `odm.Model` without `bson:",inline"` (which nests
+`_id` under a `model` key and still compiles), two fields tagged to the same
+name, a relation field that isn't `bson:"-"` and so gets persisted.
+
+It adapts to what the model embeds — soft deletes, timestamps and tracked
+state are only checked where they exist, and `SyncIndexes` only where the
+model implements `odm.Indexer`. Give it a collection of its own: it writes,
+reads and deletes.
 
 ## Examples
 
