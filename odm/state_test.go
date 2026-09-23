@@ -22,7 +22,7 @@ func (tracked) CollectionName() string { return "tracked" }
 func newTracked(t *testing.T, model *tracked) *tracked {
 	t.Helper()
 
-	model.ID = "id-1"
+	model.ID = bson.NewObjectID()
 	if err := snapshot(model); err != nil {
 		t.Fatalf("snapshot() error = %v", err)
 	}
@@ -46,7 +46,7 @@ func TestIsPersisted(t *testing.T) {
 		t.Parallel()
 
 		model := tracked{Name: "Nana"}
-		model.ID = "looks-real"
+		model.ID = bson.NewObjectID()
 		if IsPersisted(&model) {
 			t.Error("IsPersisted() = true for a model that was never read or written")
 		}
@@ -127,7 +127,7 @@ func TestChanges(t *testing.T) {
 		t.Parallel()
 
 		model := newTracked(t, &tracked{Name: "Nana"})
-		model.ID = "a-different-id"
+		model.ID = bson.NewObjectID()
 
 		set, unset := changesOrFail(t, model)
 		if _, ok := set["_id"]; ok {

@@ -197,7 +197,7 @@ func (c *Collection[T]) Exists(ctx context.Context) (bool, error) {
 
 // Create inserts model. It takes a pointer so the fields it fills in are
 // visible to the caller afterwards: a model embedding odm.Model or
-// odm.IdentityModel gets a ULID _id (unless one is already set), and
+// odm.IdentityModel gets a new ObjectID _id (unless one is already set), and
 // odm.Model also gets its CreatedAt/UpdatedAt stamped. A model that embeds
 // neither is inserted exactly as given.
 //

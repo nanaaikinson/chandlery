@@ -40,11 +40,32 @@ func (User) CollectionName() string {
 ```
 
 `odm.Model` is optional. Embed it (inline, so its fields land at the top
-level of the document) for a ULID `_id` plus `created_at`/`updated_at` that
+level of the document) for an ObjectID `_id` plus `created_at`/`updated_at` that
 `Create` stamps and `Update` refreshes. Two alternatives:
 
-- `odm.IdentityModel` — the ULID `_id` alone, for a collection with no
+- `odm.IdentityModel` — the ObjectID `_id` alone, for a collection with no
   timestamps.
+- either of those plus your own `ID` field, to change the `_id` type while
+  keeping the timestamps and dirty tracking. The outer field shadows the
+  embedded one (in Go and in the BSON codec alike), and a `BeforeCreate` hook
+  assigns it:
+
+  ```go
+  type Tenant struct {
+  	odm.Model `bson:",inline"`
+  	ID        string `bson:"_id" json:"id"`
+  }
+
+  func (t *Tenant) BeforeCreate(ctx context.Context) error {
+  	if t.ID == "" {
+  		t.ID = ulid.Make().String()
+  	}
+  	return nil
+  }
+  ```
+
+  Once you shadow it, generating the ID is yours — an unset string is stored
+  as `_id: ""`.
 - neither — a struct with its own `bson:"_id"`, or none at all, letting
   MongoDB generate an ObjectID.
 
@@ -84,7 +105,7 @@ result, err := users.
 ```go
 user := User{Name: "Nana", Email: "nana@example.com"}
 
-// Create takes a pointer, so the ULID and timestamps it assigns are
+// Create takes a pointer, so the ObjectID and timestamps it assigns are
 // visible on your own variable afterwards.
 err := users.Create(ctx, &user)
 ```
@@ -348,7 +369,7 @@ second-guessing them is how a bulk API stops being usable for what bulk APIs
 are for.
 
 `CreateMany` is the one convenience on top — one round trip, with the same
-preparation `Create` gives a single model (hooks, ULID, timestamps), every
+preparation `Create` gives a single model (hooks, ObjectID, timestamps), every
 model prepared before anything is sent:
 
 ```go
@@ -416,8 +437,16 @@ func (u *User) BeforeCreate(ctx context.Context) error {
 | `BeforeUpdate` | Before `Save` writes a changed model. It may change the model; the update is recomputed after it runs. |
 | `AfterUpdate`  | After `Save`'s write succeeds.                                    |
 
-`BeforeCreate` runs *before* the ULID and timestamps are assigned, so a hook
-that sets its own `ID` or `CreatedAt` wins.
+`BeforeCreate` runs *before* the ObjectID and timestamps are assigned, so a
+hook that sets its own `ID` or `CreatedAt` wins — `Create` only generates an
+`ID` when it is still zero:
+
+```go
+func (u *User) BeforeCreate(ctx context.Context) error {
+	u.ID = bson.NewObjectIDFromTimestamp(u.ImportedAt)
+	return nil
+}
+```
 
 Hooks fire only where a model instance actually exists — `Create`,
 `CreateMany` and `Save`. A query-level `Update` or `Delete` acts on every
@@ -725,8 +754,8 @@ collection in it — the list *is* the relationship:
 type User struct {
 	odm.Model `bson:",inline"`
 
-	RoleIDs []string `bson:"role_ids"`
-	Roles   []Role   `bson:"-"`
+	RoleIDs []bson.ObjectID `bson:"role_ids"`
+	Roles   []Role          `bson:"-"`
 }
 
 var UserRoles = odm.BelongsToMany[User, Role]{

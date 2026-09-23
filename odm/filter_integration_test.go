@@ -177,9 +177,9 @@ func TestNullQueries(t *testing.T) {
 	// that is explicitly null and one that isn't there at all — which a Go
 	// struct can't express, since it always marshals every field.
 	documents := []any{
-		bson.M{"_id": "explicit-null", "name": "explicit-null", "deleted_at": nil},
-		bson.M{"_id": "missing", "name": "missing"},
-		bson.M{"_id": "present", "name": "present", "deleted_at": "2026-01-01"},
+		bson.M{"_id": bson.NewObjectID(), "name": "explicit-null", "deleted_at": nil},
+		bson.M{"_id": bson.NewObjectID(), "name": "missing"},
+		bson.M{"_id": bson.NewObjectID(), "name": "present", "deleted_at": "2026-01-01"},
 	}
 	if _, err := users.Raw().InsertMany(ctx, documents); err != nil {
 		t.Fatalf("InsertMany() error = %v", err)
@@ -236,7 +236,7 @@ func TestBetweenQueries(t *testing.T) {
 	)
 	// A document with no age at all, to pin down what the $or form does
 	// with a missing field.
-	if _, err := users.Raw().InsertOne(ctx, bson.M{"_id": "ageless", "name": "ageless"}); err != nil {
+	if _, err := users.Raw().InsertOne(ctx, bson.M{"_id": bson.NewObjectID(), "name": "ageless"}); err != nil {
 		t.Fatalf("InsertOne() error = %v", err)
 	}
 
@@ -287,7 +287,7 @@ func TestProjectionQueries(t *testing.T) {
 		if got.Status != "" || got.Age != 0 {
 			t.Errorf("First() = %+v, want unprojected fields left zero", got)
 		}
-		if got.ID == "" {
+		if got.ID.IsZero() {
 			t.Error("First() dropped _id, want it kept unless excluded")
 		}
 	})
@@ -317,8 +317,8 @@ func TestProjectionQueries(t *testing.T) {
 		if got.Name != "Nana" {
 			t.Errorf("First() name = %q, want %q", got.Name, "Nana")
 		}
-		if got.ID != "" {
-			t.Errorf("First() ID = %q, want it excluded", got.ID)
+		if !got.ID.IsZero() {
+			t.Errorf("First() ID = %v, want it excluded", got.ID)
 		}
 	})
 

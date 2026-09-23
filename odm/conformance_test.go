@@ -13,14 +13,14 @@ func TestModelID(t *testing.T) {
 		t.Parallel()
 
 		model := &tracked{Name: "Nana"}
-		model.ID = "01H0"
+		model.ID = bson.NewObjectID()
 
 		id, ok := modelID(model)
 		if !ok {
 			t.Fatal("modelID() found no _id on a model that has one")
 		}
-		if id != "01H0" {
-			t.Errorf("modelID() = %v, want %q", id, "01H0")
+		if id != model.ID {
+			t.Errorf("modelID() = %v, want %v", id, model.ID)
 		}
 	})
 

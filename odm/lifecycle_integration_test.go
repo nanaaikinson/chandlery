@@ -23,8 +23,8 @@ type hooked struct {
 
 	// Unexported, so none of this reaches MongoDB.
 	calls      []string
-	idAtBefore string
-	idAtAfter  string
+	idAtBefore bson.ObjectID
+	idAtAfter  bson.ObjectID
 	afterError error
 }
 
@@ -41,6 +41,21 @@ func (h *hooked) AfterCreate(_ context.Context) error {
 	h.calls = append(h.calls, "after")
 	h.idAtAfter = h.ID
 	return h.afterError
+}
+
+// choosesID picks its own _id in BeforeCreate — the override path for a
+// consumer who doesn't want the generated ObjectID.
+type choosesID struct {
+	odm.Model `bson:",inline"`
+
+	ImportedAt time.Time `bson:"imported_at"`
+}
+
+func (choosesID) CollectionName() string { return "chooses_id" }
+
+func (c *choosesID) BeforeCreate(_ context.Context) error {
+	c.ID = bson.NewObjectIDFromTimestamp(c.ImportedAt)
+	return nil
 }
 
 func TestCreateHooks(t *testing.T) {
@@ -60,13 +75,13 @@ func TestCreateHooks(t *testing.T) {
 		if want := []string{"before", "after"}; !reflect.DeepEqual(model.calls, want) {
 			t.Errorf("hook calls = %v, want %v", model.calls, want)
 		}
-		// BeforeCreate runs ahead of the ULID assignment, so a hook that
+		// BeforeCreate runs ahead of the ObjectID assignment, so a hook that
 		// wants to choose the id still can; AfterCreate sees the real one.
-		if model.idAtBefore != "" {
-			t.Errorf("BeforeCreate saw ID = %q, want it unassigned", model.idAtBefore)
+		if !model.idAtBefore.IsZero() {
+			t.Errorf("BeforeCreate saw ID = %v, want it unassigned", model.idAtBefore)
 		}
-		if model.idAtAfter == "" || model.idAtAfter != model.ID {
-			t.Errorf("AfterCreate saw ID = %q, want the assigned %q", model.idAtAfter, model.ID)
+		if model.idAtAfter.IsZero() || model.idAtAfter != model.ID {
+			t.Errorf("AfterCreate saw ID = %v, want the assigned %v", model.idAtAfter, model.ID)
 		}
 
 		stored, err := docs.Find(ctx, model.ID)
@@ -75,6 +90,46 @@ func TestCreateHooks(t *testing.T) {
 		}
 		if stored.Email != "nana@example.com" {
 			t.Errorf("stored email = %q, want the hook's normalized value", stored.Email)
+		}
+	})
+
+	t.Run("stores a native ObjectID _id by default", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.Background()
+		docs := odm.Use[hooked](odm.New(testDatabase(t, client)))
+
+		model := hooked{Email: "nana@example.com"}
+		if err := docs.Create(ctx, &model); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+
+		var raw bson.Raw
+		if err := docs.Raw().FindOne(ctx, bson.M{"_id": model.ID}).Decode(&raw); err != nil {
+			t.Fatalf("FindOne() error = %v", err)
+		}
+		if got := raw.Lookup("_id").Type; got != bson.TypeObjectID {
+			t.Errorf("stored _id type = %v, want %v", got, bson.TypeObjectID)
+		}
+	})
+
+	t.Run("an ID set in BeforeCreate is kept", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := context.Background()
+		docs := odm.Use[choosesID](odm.New(testDatabase(t, client)))
+
+		importedAt := time.Date(2019, 5, 1, 0, 0, 0, 0, time.UTC)
+		model := choosesID{ImportedAt: importedAt}
+		if err := docs.Create(ctx, &model); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+
+		if !model.ID.Timestamp().Equal(importedAt) {
+			t.Errorf("ID timestamp = %v, want the hook's %v", model.ID.Timestamp(), importedAt)
+		}
+		if _, err := docs.Find(ctx, model.ID); err != nil {
+			t.Errorf("Find() error = %v, want the document stored under the hook's ID", err)
 		}
 	})
 

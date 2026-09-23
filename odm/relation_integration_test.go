@@ -24,7 +24,7 @@ type customer struct {
 	Name string `bson:"name"`
 	// The ids of the roles this customer holds: MongoDB's usual shape for a
 	// many-to-many, with no join collection in sight.
-	RoleIDs []string `bson:"role_ids"`
+	RoleIDs []bson.ObjectID `bson:"role_ids"`
 
 	// Loaded, not stored — see the bson:"-" test below.
 	Orders  []purchase `bson:"-"`
@@ -37,8 +37,8 @@ func (customer) CollectionName() string { return "customers" }
 type purchase struct {
 	odm.Model `bson:",inline"`
 
-	CustomerID string `bson:"customer_id"`
-	Total      int    `bson:"total"`
+	CustomerID bson.ObjectID `bson:"customer_id"`
+	Total      int           `bson:"total"`
 
 	Customer *customer `bson:"-"`
 	Payments []payment `bson:"-"`
@@ -59,8 +59,8 @@ func (role) CollectionName() string { return "roles" }
 type payment struct {
 	odm.Model `bson:",inline"`
 
-	PurchaseID string `bson:"purchase_id"`
-	Amount     int    `bson:"amount"`
+	PurchaseID bson.ObjectID `bson:"purchase_id"`
+	Amount     int           `bson:"amount"`
 }
 
 func (payment) CollectionName() string { return "payments" }
@@ -68,8 +68,8 @@ func (payment) CollectionName() string { return "payments" }
 type profile struct {
 	odm.Model `bson:",inline"`
 
-	CustomerID string `bson:"customer_id"`
-	Tier       string `bson:"tier"`
+	CustomerID bson.ObjectID `bson:"customer_id"`
+	Tier       string        `bson:"tier"`
 }
 
 func (profile) CollectionName() string { return "profiles" }
@@ -285,7 +285,7 @@ func TestBelongsTo(t *testing.T) {
 
 		ctx := context.Background()
 		s := newShop(t)
-		create(t, s.purchases, &purchase{CustomerID: "no-such-customer", Total: 10})
+		create(t, s.purchases, &purchase{CustomerID: bson.NewObjectID(), Total: 10})
 
 		got, err := s.purchases.With(purchaseCustomer).Get(ctx)
 		if err != nil {
@@ -635,8 +635,8 @@ func TestManyToMany(t *testing.T) {
 		create(t, s.roles, admin, member)
 
 		create(t, s.customers,
-			&customer{Name: "both", RoleIDs: []string{admin.ID, member.ID}},
-			&customer{Name: "member-only", RoleIDs: []string{member.ID}},
+			&customer{Name: "both", RoleIDs: []bson.ObjectID{admin.ID, member.ID}},
+			&customer{Name: "member-only", RoleIDs: []bson.ObjectID{member.ID}},
 			&customer{Name: "none"},
 		)
 		return s, admin, member
@@ -700,7 +700,7 @@ func TestManyToMany(t *testing.T) {
 		s := newShop(t)
 		admin := &role{Name: "admin"}
 		create(t, s.roles, admin)
-		create(t, s.customers, &customer{Name: "twice", RoleIDs: []string{admin.ID, admin.ID}})
+		create(t, s.customers, &customer{Name: "twice", RoleIDs: []bson.ObjectID{admin.ID, admin.ID}})
 
 		got, err := s.customers.With(customerRoles).First(ctx)
 		if err != nil {
@@ -716,7 +716,7 @@ func TestManyToMany(t *testing.T) {
 
 		ctx := context.Background()
 		s := newShop(t)
-		create(t, s.customers, &customer{Name: "none", RoleIDs: []string{}})
+		create(t, s.customers, &customer{Name: "none", RoleIDs: []bson.ObjectID{}})
 
 		got, err := s.customers.With(customerRoles).First(ctx)
 		if err != nil {
@@ -763,7 +763,7 @@ func TestManyToMany(t *testing.T) {
 		for i := range 10 {
 			create(t, s.customers, &customer{
 				Name:    string(rune('a' + i)),
-				RoleIDs: []string{admin.ID, member.ID},
+				RoleIDs: []bson.ObjectID{admin.ID, member.ID},
 			})
 		}
 

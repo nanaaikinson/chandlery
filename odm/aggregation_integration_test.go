@@ -186,7 +186,7 @@ func TestBulkWrite(t *testing.T) {
 		mongo.NewDeleteOneModel().
 			SetFilter(bson.M{"_id": deleted.ID}),
 		mongo.NewInsertOneModel().
-			SetDocument(bson.M{"_id": "inserted", "name": "fresh", "status": "active"}),
+			SetDocument(bson.M{"_id": bson.NewObjectID(), "name": "fresh", "status": "active"}),
 	})
 	if err != nil {
 		t.Fatalf("BulkWrite() error = %v", err)
@@ -224,9 +224,9 @@ func TestCreateMany(t *testing.T) {
 			t.Fatalf("CreateMany() error = %v", err)
 		}
 
-		seen := map[string]bool{}
+		seen := map[bson.ObjectID]bool{}
 		for _, model := range models {
-			if model.ID == "" {
+			if model.ID.IsZero() {
 				t.Errorf("%q kept an empty ID", model.Name)
 			}
 			if seen[model.ID] {

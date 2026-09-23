@@ -27,7 +27,7 @@ func (c *Collection[T]) BulkWrite(ctx context.Context, models []mongo.WriteModel
 }
 
 // CreateMany inserts several models in one round trip, with the same
-// preparation Create gives one: BeforeCreate on each, then the ULID and
+// preparation Create gives one: BeforeCreate on each, then the ObjectID and
 // timestamps, then a single insert, then AfterCreate on each. Every model is
 // prepared before anything is sent, so a BeforeCreate failure means nothing
 // was written.

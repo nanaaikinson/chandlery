@@ -14,8 +14,14 @@ import (
 //		return nil
 //	}
 //
-// It runs before the ULID and timestamps are assigned, so a hook that sets
-// its own ID or CreatedAt wins.
+// It runs before the ObjectID and timestamps are assigned, so a hook that
+// sets its own ID or CreatedAt wins — including on a model that overrides
+// the _id type (see IdentityModel), where the hook is what assigns it:
+//
+//	func (u *User) BeforeCreate(ctx context.Context) error {
+//		u.ID = bson.NewObjectIDFromTimestamp(u.ImportedAt)
+//		return nil
+//	}
 type BeforeCreate interface {
 	BeforeCreate(ctx context.Context) error
 }

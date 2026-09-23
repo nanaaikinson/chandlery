@@ -31,7 +31,7 @@ import (
 	"github.com/nanaaikinson/chandlery/odm"
 )
 
-// Customer embeds odm.Model for a ULID _id and timestamps, and
+// Customer embeds odm.Model for an ObjectID _id and timestamps, and
 // odm.SoftDeletes so Delete stamps rather than removes.
 type Customer struct {
 	odm.Model       `bson:",inline"`
@@ -63,8 +63,8 @@ func (c *Customer) BeforeCreate(context.Context) error {
 type Order struct {
 	odm.Model `bson:",inline"`
 
-	CustomerID string `bson:"customer_id"`
-	Total      int64  `bson:"total"`
+	CustomerID bson.ObjectID `bson:"customer_id"`
+	Total      int64         `bson:"total"`
 }
 
 func (Order) CollectionName() string { return "orders" }
@@ -152,7 +152,7 @@ func indexes(ctx context.Context, customers *odm.Collection[Customer], _ *odm.Co
 }
 
 func createAndSave(ctx context.Context, customers *odm.Collection[Customer], _ *odm.Collection[Order]) error {
-	// BeforeCreate lower-cases the email; the ULID and timestamps land on
+	// BeforeCreate lower-cases the email; the ObjectID and timestamps land on
 	// the model because Create takes a pointer.
 	nana := &Customer{Name: "Nana", Email: "  Nana@Example.com ", IsActive: true}
 	if err := customers.Create(ctx, nana); err != nil {

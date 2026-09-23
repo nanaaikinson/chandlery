@@ -3,7 +3,7 @@ package odm
 import (
 	"time"
 
-	"github.com/oklog/ulid/v2"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // The field names this package writes to on a model's behalf. They match
@@ -16,8 +16,8 @@ const (
 	deletedAtField = "deleted_at"
 )
 
-// IdentityModel is an optional base struct carrying just a ULID primary key,
-// assigned by Create when it isn't already set. Embed it inline so the field
+// IdentityModel is an optional base struct carrying just an ObjectID primary
+// key, assigned by Create when it isn't already set. Embed it inline so the field
 // lands at the top level of the document:
 //
 //	type Session struct {
@@ -31,12 +31,34 @@ const (
 // struct with its own `bson:"_id"` field, or none at all (letting MongoDB
 // generate an ObjectID), works the same everywhere else in this package.
 //
-// ID is a string rather than a ulid.ULID so it stores as a readable,
-// lexicographically sortable Mongo string — matching db.IdentityModel, and
-// avoiding a raw 16-byte array in the document. Use your own _id field if
-// you want a different type; Find takes an id of any type.
+// ID is a native bson.ObjectID — the same type MongoDB itself generates for
+// a document inserted without an _id — so it indexes, sorts by creation
+// time and round-trips through other MongoDB tooling as a real ObjectID. To
+// choose the ID yourself, set it before Create (or in a BeforeCreate hook):
+// a non-zero ID is never overwritten.
+//
+// To use a different _id type, such as a ULID string, declare your own ID
+// field next to the embed. It shadows this one — in Go, and in the BSON
+// codec, which resolves duplicate inline keys by the same rule — and you
+// keep the timestamps and dirty tracking:
+//
+//	type Tenant struct {
+//		odm.Model `bson:",inline"`
+//		ID        string `bson:"_id" json:"id"`
+//	}
+//
+//	func (t *Tenant) BeforeCreate(ctx context.Context) error {
+//		if t.ID == "" {
+//			t.ID = ulid.Make().String()
+//		}
+//		return nil
+//	}
+//
+// Create only generates an ObjectID for this struct's own field, so once
+// you shadow it, assigning the ID is yours: leave it empty and the document
+// is stored under _id "". Find takes an id of any type.
 type IdentityModel struct {
-	ID string `bson:"_id" json:"id"`
+	ID bson.ObjectID `bson:"_id" json:"id"`
 
 	// state is this package's own bookkeeping — whether the model came from
 	// the database, and what it looked like then. Unexported, so the BSON
@@ -71,11 +93,11 @@ type inserter interface {
 	prepareForInsert(now time.Time)
 }
 
-// prepareForInsert assigns a ULID if ID is unset, so a caller-supplied ID
-// survives.
+// prepareForInsert assigns a new ObjectID if ID is unset, so a
+// caller-supplied ID survives.
 func (m *IdentityModel) prepareForInsert(_ time.Time) {
-	if m.ID == "" {
-		m.ID = ulid.Make().String()
+	if m.ID.IsZero() {
+		m.ID = bson.NewObjectID()
 	}
 }
 

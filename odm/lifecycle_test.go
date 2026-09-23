@@ -69,7 +69,7 @@ func TestModelMetadata(t *testing.T) {
 	})
 }
 
-func TestIdentityModelAssignsULID(t *testing.T) {
+func TestIdentityModelAssignsObjectID(t *testing.T) {
 	t.Parallel()
 
 	t.Run("assigns an id and leaves timestamps alone", func(t *testing.T) {
@@ -77,18 +77,19 @@ func TestIdentityModelAssignsULID(t *testing.T) {
 
 		var model IdentityModel
 		model.prepareForInsert(testNow)
-		if model.ID == "" {
-			t.Error("prepareForInsert() left ID empty, want a ULID")
+		if model.ID.IsZero() {
+			t.Error("prepareForInsert() left ID empty, want an ObjectID")
 		}
 	})
 
 	t.Run("keeps an id the caller already set", func(t *testing.T) {
 		t.Parallel()
 
-		model := IdentityModel{ID: "chosen"}
+		chosen := bson.NewObjectID()
+		model := IdentityModel{ID: chosen}
 		model.prepareForInsert(testNow)
-		if model.ID != "chosen" {
-			t.Errorf("prepareForInsert() overwrote ID = %q, want %q", model.ID, "chosen")
+		if model.ID != chosen {
+			t.Errorf("prepareForInsert() overwrote ID = %v, want %v", model.ID, chosen)
 		}
 	})
 
@@ -97,8 +98,8 @@ func TestIdentityModelAssignsULID(t *testing.T) {
 
 		var model Model
 		model.prepareForInsert(testNow)
-		if model.ID == "" {
-			t.Error("prepareForInsert() left ID empty, want a ULID")
+		if model.ID.IsZero() {
+			t.Error("prepareForInsert() left ID empty, want an ObjectID")
 		}
 		if !model.CreatedAt.Equal(testNow) || !model.UpdatedAt.Equal(testNow) {
 			t.Errorf("prepareForInsert() left %v/%v, want both %v", model.CreatedAt, model.UpdatedAt, testNow)
@@ -293,10 +294,10 @@ type hookedDoc struct {
 
 	Name string `bson:"name"`
 
-	calls       []string `bson:"-"`
-	idAtBefore  string   `bson:"-"`
-	beforeError error    `bson:"-"`
-	afterError  error    `bson:"-"`
+	calls       []string      `bson:"-"`
+	idAtBefore  bson.ObjectID `bson:"-"`
+	beforeError error         `bson:"-"`
+	afterError  error         `bson:"-"`
 }
 
 func (hookedDoc) CollectionName() string { return "hooked_docs" }
@@ -331,8 +332,8 @@ func TestCreateHookErrors(t *testing.T) {
 		if reflect.DeepEqual(model.calls, []string{"before", "after"}) {
 			t.Error("AfterCreate ran after BeforeCreate failed")
 		}
-		if model.ID != "" {
-			t.Errorf("Create() assigned ID = %q despite the hook failing", model.ID)
+		if !model.ID.IsZero() {
+			t.Errorf("Create() assigned ID = %v despite the hook failing", model.ID)
 		}
 	})
 

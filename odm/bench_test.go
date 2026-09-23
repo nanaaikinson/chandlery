@@ -123,7 +123,7 @@ func BenchmarkSnapshot(b *testing.B) {
 	// Paid once per hydrated document on a trackable model, so it is the
 	// price of dirty tracking on a read.
 	model := &tracked{Name: "Nana", Nickname: "NK"}
-	model.ID = "01H0"
+	model.ID = bson.NewObjectID()
 
 	b.ReportAllocs()
 	for b.Loop() {
@@ -135,7 +135,7 @@ func BenchmarkSnapshot(b *testing.B) {
 
 func BenchmarkChangesClean(b *testing.B) {
 	model := &tracked{Name: "Nana", Nickname: "NK"}
-	model.ID = "01H0"
+	model.ID = bson.NewObjectID()
 	if err := snapshot(model); err != nil {
 		b.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func BenchmarkChangesClean(b *testing.B) {
 
 func BenchmarkChangesDirty(b *testing.B) {
 	model := &tracked{Name: "Nana", Nickname: "NK"}
-	model.ID = "01H0"
+	model.ID = bson.NewObjectID()
 	if err := snapshot(model); err != nil {
 		b.Fatal(err)
 	}

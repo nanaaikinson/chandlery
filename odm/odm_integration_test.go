@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oklog/ulid/v2"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
@@ -127,8 +126,8 @@ func TestCreate(t *testing.T) {
 			t.Fatalf("Create() error = %v", err)
 		}
 
-		if _, err := ulid.Parse(model.ID); err != nil {
-			t.Errorf("Create() left ID = %q, want a ULID: %v", model.ID, err)
+		if model.ID.IsZero() {
+			t.Error("Create() left ID unset, want a generated ObjectID")
 		}
 		if !model.CreatedAt.Equal(at) || !model.UpdatedAt.Equal(at) {
 			t.Errorf("Create() left CreatedAt/UpdatedAt = %v/%v, want both %v", model.CreatedAt, model.UpdatedAt, at)
@@ -155,14 +154,15 @@ func TestCreate(t *testing.T) {
 		users := newUsers(t, clockAt(at))
 
 		model := user{Name: "Nana"}
-		model.ID = "chosen-id"
+		chosen := bson.NewObjectID()
+		model.ID = chosen
 		model.CreatedAt = backfilled
 
 		if err := users.Create(ctx, &model); err != nil {
 			t.Fatalf("Create() error = %v", err)
 		}
-		if model.ID != "chosen-id" {
-			t.Errorf("Create() overwrote ID = %q, want %q", model.ID, "chosen-id")
+		if model.ID != chosen {
+			t.Errorf("Create() overwrote ID = %v, want %v", model.ID, chosen)
 		}
 		if !model.CreatedAt.Equal(backfilled) {
 			t.Errorf("Create() overwrote CreatedAt = %v, want %v", model.CreatedAt, backfilled)
@@ -171,7 +171,7 @@ func TestCreate(t *testing.T) {
 			t.Errorf("Create() left UpdatedAt = %v, want %v", model.UpdatedAt, at)
 		}
 
-		if _, err := users.Find(ctx, "chosen-id"); err != nil {
+		if _, err := users.Find(ctx, chosen); err != nil {
 			t.Errorf("Find() error = %v, want the document stored under its chosen _id", err)
 		}
 	})

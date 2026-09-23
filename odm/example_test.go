@@ -48,8 +48,8 @@ func (u *User) BeforeCreate(context.Context) error {
 type Order struct {
 	odm.Model `bson:",inline"`
 
-	UserID string `bson:"user_id"`
-	Total  int64  `bson:"total"`
+	UserID bson.ObjectID `bson:"user_id"`
+	Total  int64         `bson:"total"`
 
 	Payments []Payment `bson:"-"`
 }
@@ -60,8 +60,8 @@ func (Order) CollectionName() string { return "orders" }
 type Payment struct {
 	odm.Model `bson:",inline"`
 
-	OrderID string `bson:"order_id"`
-	Amount  int64  `bson:"amount"`
+	OrderID bson.ObjectID `bson:"order_id"`
+	Amount  int64         `bson:"amount"`
 }
 
 func (Payment) CollectionName() string { return "payments" }
@@ -101,7 +101,7 @@ func Example() {
 	if err := users.Create(ctx, &user); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(user.ID != "", user.Email)
+	fmt.Println(!user.ID.IsZero(), user.Email)
 
 	found, err := users.Where("email", "nana@example.com").First(ctx)
 	if errors.Is(err, odm.ErrModelNotFound) {

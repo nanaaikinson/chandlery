@@ -50,7 +50,7 @@ func newArticles(t *testing.T, opts ...odm.Option) *odm.Collection[article] {
 }
 
 // storedArticle reads a document as MongoDB actually holds it.
-func storedArticle(t *testing.T, articles *odm.Collection[article], id string) bson.M {
+func storedArticle(t *testing.T, articles *odm.Collection[article], id bson.ObjectID) bson.M {
 	t.Helper()
 
 	var stored bson.M
@@ -73,7 +73,7 @@ func TestSave(t *testing.T) {
 		if err := articles.Save(ctx, model); err != nil {
 			t.Fatalf("Save() error = %v", err)
 		}
-		if model.ID == "" {
+		if model.ID.IsZero() {
 			t.Error("Save() left ID empty, want an inserted model to be identified")
 		}
 		if !odm.IsPersisted(model) {
@@ -96,13 +96,14 @@ func TestSave(t *testing.T) {
 		articles := newArticles(t)
 
 		model := &article{Title: "chosen"}
-		model.ID = "my-own-id"
+		chosen := bson.NewObjectID()
+		model.ID = chosen
 		if err := articles.Save(ctx, model); err != nil {
 			t.Fatalf("Save() error = %v", err)
 		}
 
 		// Existence comes from state, not from a non-zero ID.
-		if _, err := articles.Find(ctx, "my-own-id"); err != nil {
+		if _, err := articles.Find(ctx, chosen); err != nil {
 			t.Errorf("Find() error = %v, want the model inserted under its chosen id", err)
 		}
 	})
@@ -424,8 +425,9 @@ func TestSave(t *testing.T) {
 
 		// A document carrying more than the struct declares — an older
 		// schema, or another service's field.
+		legacy := bson.NewObjectID()
 		if _, err := articles.Raw().InsertOne(ctx, bson.M{
-			"_id":      "legacy",
+			"_id":      legacy,
 			"title":    "first",
 			"views":    1,
 			"legacy":   "do not lose me",
@@ -434,7 +436,7 @@ func TestSave(t *testing.T) {
 			t.Fatalf("InsertOne() error = %v", err)
 		}
 
-		loaded, err := articles.Find(ctx, "legacy")
+		loaded, err := articles.Find(ctx, legacy)
 		if err != nil {
 			t.Fatalf("Find() error = %v", err)
 		}
@@ -443,7 +445,7 @@ func TestSave(t *testing.T) {
 			t.Fatalf("Save() error = %v", err)
 		}
 
-		stored := storedArticle(t, articles, "legacy")
+		stored := storedArticle(t, articles, legacy)
 		if stored["legacy"] != "do not lose me" || stored["added_by"] != "another service" {
 			t.Errorf("stored = %v, want the unknown fields untouched", stored)
 		}

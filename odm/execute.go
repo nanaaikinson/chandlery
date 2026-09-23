@@ -145,8 +145,8 @@ func (q *Query[T]) First(ctx context.Context) (T, error) {
 }
 
 // Find returns the document whose _id is id, subject to any conditions
-// already on the query. id is passed to MongoDB as-is, so it can be a ULID
-// string (what an embedded odm.Model stores), a bson.ObjectID, or whatever
+// already on the query. id is passed to MongoDB as-is, so it can be a
+// bson.ObjectID (what an embedded odm.Model stores), a string, or whatever
 // else the model's own _id holds. Missing documents behave as in First.
 func (q *Query[T]) Find(ctx context.Context, id any) (T, error) {
 	return q.Where("_id", id).First(ctx)

@@ -100,9 +100,28 @@ func (Customer) CollectionName() string { return "customers" }
 | Embed | You get |
 | --- | --- |
 | nothing | a plain document; supply your own `_id` or let MongoDB generate one |
-| `odm.IdentityModel` | a ULID `_id` assigned on insert, and dirty tracking |
+| `odm.IdentityModel` | an ObjectID `_id` assigned on insert, and dirty tracking |
 | `odm.Model` | the above plus `created_at`/`updated_at`, stamped and refreshed |
 | `odm.SoftDeletes` | `Delete` stamps `deleted_at`; reads hide those documents |
+
+**A different `_id` type.** Declare your own `ID` next to the embed and it
+shadows the embedded ObjectID — in Go and in the BSON codec alike — while the
+timestamps and dirty tracking stay. Assign it in `BeforeCreate`; once
+shadowed, `Create` no longer generates one:
+
+```go
+type Business struct {
+	odm.Model `bson:",inline"`
+	ID        string `bson:"_id" json:"id"`
+}
+
+func (b *Business) BeforeCreate(ctx context.Context) error {
+	if b.ID == "" {
+		b.ID = ulid.Make().String()
+	}
+	return nil
+}
+```
 
 **`bson:",inline"` is not optional.** Without it the embedded struct nests
 under its own lowercased name, so the document has no top-level `_id` — and
@@ -247,7 +266,7 @@ customer := Customer{
 	IsActive:   true,
 }
 
-// Takes a pointer, so the ULID and timestamps land on your variable.
+// Takes a pointer, so the ObjectID and timestamps land on your variable.
 if err := customers.Create(ctx, &customer); err != nil {
 	return err
 }
@@ -604,11 +623,11 @@ than a field name found by reflection — the compiler checks it.
 type Invoice struct {
 	odm.Model `bson:",inline"`
 
-	BusinessID string `bson:"business_id"`
-	CustomerID string `bson:"customer_id"`
-	Number     string `bson:"number"`
-	Total      int64  `bson:"total"`
-	Status     string `bson:"status"`
+	BusinessID string        `bson:"business_id"`
+	CustomerID bson.ObjectID `bson:"customer_id"`
+	Number     string        `bson:"number"`
+	Total      int64         `bson:"total"`
+	Status     string        `bson:"status"`
 
 	Customer *Customer `bson:"-"`
 	Payments []Payment `bson:"-"`
@@ -636,6 +655,12 @@ var (
 | `HasOne[T, R]` | on the related model | `*R`, nil when there is none |
 | `BelongsTo[T, R]` | on this model | `*R`, nil when unset or dangling |
 | `BelongsToMany[T, R]` | on this model, as a list | `[]R`, empty when there are none |
+
+**Give a key the same type as the `_id` it points at.** Keys are matched by
+BSON type as well as value. `odm.Model`'s default `_id` is a `bson.ObjectID`,
+so a key pointing at one is `bson.ObjectID` (or `[]bson.ObjectID` for a
+many-to-many list) — a `string` holding the hex form would never match. A
+model that overrides its `_id` to a `string` takes `string` keys instead.
 
 Load them with `With`:
 
@@ -670,8 +695,8 @@ the relationship:
 type StaffMember struct {
 	odm.Model `bson:",inline"`
 
-	RoleIDs []string `bson:"role_ids"`
-	Roles   []Role   `bson:"-"`
+	RoleIDs []bson.ObjectID `bson:"role_ids"`
+	Roles   []Role          `bson:"-"`
 }
 
 var StaffRoles = odm.BelongsToMany[StaffMember, Role]{

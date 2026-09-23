@@ -22,7 +22,7 @@
 //
 // Beyond querying, a model can opt into behavior by embedding:
 //
-//   - odm.IdentityModel gives a ULID _id, and odm.Model adds
+//   - odm.IdentityModel gives an ObjectID _id, and odm.Model adds
 //     created_at/updated_at that Create stamps and Update refreshes.
 //   - odm.SoftDeletes turns Delete into a deleted_at stamp that later reads
 //     skip, with WithTrashed, OnlyTrashed, Restore and ForceDelete to reach
