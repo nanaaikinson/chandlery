@@ -1,11 +1,11 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
-  # Called by release.yml, so a tag is held to exactly the same bar as a
-  # pull request rather than to a copy of it that can drift.
+  # Called by release.yml — on every push to main and every tag — so a
+  # release is held to exactly the same bar as a pull request rather than to
+  # a copy of it that can drift. That call is also main's CI run, which is
+  # why there's no push trigger here: it would run the suite twice.
   workflow_call:
 
 jobs:
@@ -20,6 +20,9 @@ jobs:
       - run: make fmt-check
       - run: make vet
       - run: make test
+      # The release workflow's version logic — decides every tag, so it is
+      # tested like code.
+      - run: bash .github/scripts/next-version_test.sh
 
   test-integration:
     name: integration tests (Docker)

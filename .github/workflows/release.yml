@@ -1,20 +1,44 @@
 name: Release
 
-# Releases are cut by pushing a tag. Nothing here creates one: the tag is the
-# decision, and this reacts to it.
+# Every push to main is a release candidate. The version comes from the
+# commit messages (Conventional Commits) since the last tag — see
+# .github/scripts/next-version.sh for the rules:
 #
-#   git tag -a v0.4.0 -m "v0.4.0" && git push origin v0.4.0
+#   fix: / perf:               -> v0.4.0 → v0.4.1
+#   feat:                      -> v0.4.0 → v0.5.0
+#   feat!: / BREAKING CHANGE:  -> v0.4.0 → v0.5.0 (v1.2.3 → v2.0.0 from v1 on)
+#   docs: / chore: / ci: / ...  -> no release
+#
+# Nothing to release is not a failure: the run just stops after the tests.
+#
+# Two ways to override the automatic choice:
+#
+#   - Actions → Release → Run workflow, picking patch / minor / major. This
+#     is how v1.0.0 happens: a breaking change on v0 never promotes itself.
+#   - Push a tag yourself, as before. It is verified and published the same
+#     way, and later automatic releases count on from it.
+#
+#       git tag -a v0.5.0-rc.1 -m "v0.5.0-rc.1" && git push origin v0.5.0-rc.1
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump (auto decides from the commit messages)
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
 
 # Read-only by default; only the job that publishes asks for more.
 permissions:
   contents: read
 
 jobs:
-  # A tag gets the full suite, integration included. A release is the one
-  # artefact nobody can quietly re-run, so it is worth the extra minute.
+  # The full suite, integration included, on every candidate. This is also
+  # main's CI run: ci.yml no longer triggers on pushes to main itself, so a
+  # merge doesn't run the suite twice.
   verify:
     name: verify
     uses: ./.github/workflows/ci.yml
@@ -23,24 +47,59 @@ jobs:
     name: publish
     needs: verify
     runs-on: ubuntu-latest
+    # One release decision at a time. Two quick merges would otherwise both
+    # read the same last tag and both try to claim the next version; queued,
+    # the second sees the first's tag and counts on from it.
+    concurrency:
+      group: release
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history, so the generated notes can see what came before.
+          # Full history and tags: the version is decided from them, and
+          # the generated notes need to see what came before.
           fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
-      # Two ways a Go library's tag can be wrong in a way that is painful to
-      # undo, both cheap to catch here.
-      - name: Check the tag
+      - name: Decide the version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump || 'auto' }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # Someone tagged by hand: that is the version.
+            tag="$GITHUB_REF_NAME"
+          else
+            if [ "$GITHUB_REF" != refs/heads/main ]; then
+              echo "::error::releases are cut from main, not $GITHUB_REF"
+              exit 1
+            fi
+            tag="$(.github/scripts/next-version.sh "$BUMP")"
+          fi
+
+          if [ -z "$tag" ]; then
+            echo "::notice::No feat, fix, perf or breaking change since the last release — nothing to publish."
+          else
+            echo "Releasing $tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # Two ways a Go library's tag can be wrong in a way that is painful to
+      # undo, both cheap to catch here — before an automatic tag is pushed,
+      # not just after a manual one.
+      - name: Check the tag
+        if: steps.version.outputs.tag != ''
+        env:
+          tag: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
 
           # 1. Go's module system requires semver with a leading v. A tag
           #    like 0.4.0 or v0.4 resolves for nobody, and the only fix is a
@@ -52,7 +111,8 @@ jobs:
 
           # 2. From v2 on, the major version has to be in the module path
           #    itself. Tagging v2.0.0 without renaming the module publishes a
-          #    version nothing can import.
+          #    version nothing can import — so a breaking change past v1
+          #    stops here until the module is renamed.
           major="${tag#v}"; major="${major%%.*}"
           module="$(go list -m)"
           if [ "$major" -ge 2 ] && [ "${module##*/}" != "v$major" ]; then
@@ -60,12 +120,27 @@ jobs:
             exit 1
           fi
 
-          echo "tag=$tag" >> "$GITHUB_ENV"
           echo "module=$module" >> "$GITHUB_ENV"
 
+      # A tag pushed with the workflow's own token triggers no further
+      # workflow runs, so this doesn't loop back into a second release: the
+      # rest of this job publishes it.
+      - name: Create the tag
+        if: steps.version.outputs.tag != '' && github.ref_type != 'tag'
+        env:
+          tag: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "$tag"
+          git push origin "$tag"
+
       - name: Publish the release
+        if: steps.version.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          tag: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
 
@@ -88,10 +163,12 @@ jobs:
       # effort: the release is already published, and a cold proxy is a delay
       # rather than a failure.
       - name: Warm the module proxy
+        if: steps.version.outputs.tag != ''
         continue-on-error: true
         env:
           GOPROXY: proxy.golang.org
           GOFLAGS: -mod=mod
+          tag: ${{ steps.version.outputs.tag }}
         run: |
           for attempt in 1 2 3; do
             if go list -m "$module@$tag"; then

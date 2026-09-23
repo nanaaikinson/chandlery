@@ -54,21 +54,39 @@ Early — API may still shift before v1.
 
 ## Releasing
 
-A release is a tag. Pushing one runs the full suite — including the
-Docker-backed integration tests — and publishes a GitHub release with
-generated notes:
+Releases are automatic. Every push to `main` runs the full suite — including
+the Docker-backed integration tests — then reads the commit messages since
+the last tag ([Conventional Commits](https://www.conventionalcommits.org)),
+tags the next version and publishes a GitHub release with generated notes:
+
+| Commits since the last tag | Next version |
+| --- | --- |
+| `fix:` / `perf:` | patch — `v0.4.0` → `v0.4.1` |
+| `feat:` | minor — `v0.4.0` → `v0.5.0` |
+| `feat!:` / `BREAKING CHANGE:` footer | minor while on v0 (`v0.5.0`); major from v1 on |
+| only `docs:`, `chore:`, `ci:`, `test:`, … | no release |
+
+With squash merges, the PR title is the commit message — so it is what
+decides the version.
+
+A breaking change on v0 never promotes itself to v1. To choose the bump
+yourself — v1.0.0 included — run the **Release** workflow from the Actions tab
+and pick `patch`, `minor` or `major`. Pushing a tag by hand still works too,
+and later automatic releases count on from it:
 
 ```bash
-git tag -a v0.4.0 -m "v0.4.0" && git push origin v0.4.0
+git tag -a v0.5.0-rc.1 -m "v0.5.0-rc.1" && git push origin v0.5.0-rc.1
 ```
+
+A tag with a hyphen (`v0.5.0-rc.1`) is published as a prerelease, and doesn't
+count as the base for the next automatic version.
 
 The workflow refuses a tag Go can't use: it must be `vMAJOR.MINOR.PATCH`
 (`0.4.0` without the `v` resolves for nobody), and from v2 on the major
 version has to be in the module path too — tagging `v2.0.0` without renaming
-the module to `.../v2` publishes a version nothing can import. A published
+the module to `.../v2` publishes a version nothing can import. So after v1, a
+breaking change stops the release until the module is renamed. A published
 version is immutable, so both are cheaper to catch before the tag than after.
-
-A tag with a hyphen (`v0.4.0-rc.1`) is published as a prerelease.
 
 ## License
 
