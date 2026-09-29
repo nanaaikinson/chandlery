@@ -6,7 +6,7 @@ build:
 test:
 	go test ./...
 
-# Requires Docker (testcontainers spins up a real Postgres, Redis, MinIO and
+# Requires Docker (testcontainers spins up a real Postgres, Redis, RustFS and
 # MongoDB). Run pull-images first on a cold machine.
 test-integration:
 	go test -tags=integration ./...
@@ -23,13 +23,13 @@ test-integration:
 # a genuinely unavailable image, not this. Pre-pulling only ever saves time.
 #
 # Withdrawal is not hypothetical: MinIO removed minio/minio from Docker Hub,
-# which broke storage/s3 with "repository does not exist" and no change on our
-# side. Hence quay.io below.
+# then locked quay.io/minio/minio behind auth, breaking storage/s3 twice with
+# no change on our side. Hence RustFS below.
 pull-images:
 	@printf '%s\n' \
 		postgres:16-alpine \
 		redis:7-alpine \
-		quay.io/minio/minio:RELEASE.2024-01-16T16-07-38Z \
+		rustfs/rustfs:1.0.0 \
 		mongo:8 \
 		testcontainers/ryuk:0.14.0 \
 		| xargs -P 5 -n 1 -I{} sh -c 'docker pull --quiet {} || echo "pull-images: skipped {}" >&2' 
