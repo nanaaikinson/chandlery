@@ -1,9 +1,11 @@
 package fiber
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -152,4 +154,39 @@ func TestErrorHandler(t *testing.T) {
 			t.Errorf("body = %+v, want %+v", body, want)
 		}
 	})
+}
+
+type contextKey struct{}
+
+// ctxHandler records the context each log record was made with.
+type ctxHandler struct {
+	slog.Handler
+	got *[]context.Context
+}
+
+func (ctxHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h ctxHandler) Handle(ctx context.Context, _ slog.Record) error {
+	*h.got = append(*h.got, ctx)
+	return nil
+}
+
+// Not parallel: it swaps the default logger.
+func TestInternalLogsWithRequestContext(t *testing.T) {
+	var got []context.Context
+	previous := slog.Default()
+	slog.SetDefault(slog.New(ctxHandler{Handler: slog.DiscardHandler, got: &got}))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	app := gofiber.New()
+	app.Get("/", func(c gofiber.Ctx) error {
+		c.SetContext(context.WithValue(c.Context(), contextKey{}, "request"))
+		return Internal(c, errors.New("boom"))
+	})
+	if _, err := app.Test(httptest.NewRequest("GET", "/", nil)); err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if len(got) != 1 || got[0].Value(contextKey{}) != "request" {
+		t.Fatalf("logged contexts = %v", got)
+	}
 }

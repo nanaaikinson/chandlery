@@ -49,7 +49,7 @@ func handleError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 
 	if writeErr := JSON(w, status, respond.Fail(errType, message)); writeErr != nil {
-		slog.Error("failed to write error response", "method", r.Method, "path", r.URL.Path, "error", writeErr)
+		slog.ErrorContext(r.Context(), "failed to write error response", "method", r.Method, "path", r.URL.Path, "error", writeErr)
 	}
 }
 
@@ -123,7 +123,7 @@ func RequestIDFromContext(ctx context.Context) string {
 
 // logServerError records a server-side failure with request context.
 func logServerError(r *http.Request, err error) {
-	slog.Error("request failed",
+	slog.ErrorContext(r.Context(), "request failed",
 		"method", r.Method,
 		"path", r.URL.Path,
 		"request_id", RequestIDFromContext(r.Context()),

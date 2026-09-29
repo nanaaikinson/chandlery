@@ -92,8 +92,11 @@ func validStatus(status int) bool {
 // WithRequestID/RequestIDFromContext of its own), this reads the ID via
 // Fiber's own requestid middleware — wire that middleware in if you want one
 // populated here; there's no chandlery-specific equivalent to add for Fiber.
+//
+// It logs with the request's context, so handlers that read context (trace
+// IDs, request-scoped attributes) can correlate the failure.
 func logServerError(c gofiber.Ctx, err error) {
-	slog.Error("request failed",
+	slog.ErrorContext(c.Context(), "request failed",
 		"method", c.Method(),
 		"path", c.Path(),
 		"request_id", requestid.FromContext(c),
