@@ -158,24 +158,27 @@ func TestErrorHandler(t *testing.T) {
 
 type contextKey struct{}
 
-// ctxHandler records the context each log record was made with.
+// ctxHandler keeps each record and the context it was made with.
 type ctxHandler struct {
 	slog.Handler
-	got *[]context.Context
+	got     *[]context.Context
+	records *[]slog.Record
 }
 
 func (ctxHandler) Enabled(context.Context, slog.Level) bool { return true }
 
-func (h ctxHandler) Handle(ctx context.Context, _ slog.Record) error {
+func (h ctxHandler) Handle(ctx context.Context, record slog.Record) error {
 	*h.got = append(*h.got, ctx)
+	*h.records = append(*h.records, record)
 	return nil
 }
 
 // Not parallel: it swaps the default logger.
 func TestInternalLogsWithRequestContext(t *testing.T) {
 	var got []context.Context
+	var records []slog.Record
 	previous := slog.Default()
-	slog.SetDefault(slog.New(ctxHandler{Handler: slog.DiscardHandler, got: &got}))
+	slog.SetDefault(slog.New(ctxHandler{Handler: slog.DiscardHandler, got: &got, records: &records}))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	app := gofiber.New()
@@ -189,4 +192,14 @@ func TestInternalLogsWithRequestContext(t *testing.T) {
 	if len(got) != 1 || got[0].Value(contextKey{}) != "request" {
 		t.Fatalf("logged contexts = %v", got)
 	}
+	// Read after the request ends, when Fiber has reused its buffers.
+	if _, err := app.Test(httptest.NewRequest("GET", "/other-path-to-overwrite", nil)); err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	records[0].Attrs(func(a slog.Attr) bool {
+		if a.Key == "path" && a.Value.String() != "/" {
+			t.Errorf("path = %q, want %q", a.Value.String(), "/")
+		}
+		return true
+	})
 }
