@@ -5,6 +5,7 @@ package fiber
 import (
 	"errors"
 	"log/slog"
+	"strings"
 
 	gofiber "github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
@@ -94,12 +95,14 @@ func validStatus(status int) bool {
 // populated here; there's no chandlery-specific equivalent to add for Fiber.
 //
 // It logs with the request's context, so handlers that read context (trace
-// IDs, request-scoped attributes) can correlate the failure.
+// IDs, request-scoped attributes) can correlate the failure. Fiber's strings
+// view buffers it reuses after the request, and a handler may keep a record
+// longer (batching exporters do), so they are copied.
 func logServerError(c gofiber.Ctx, err error) {
 	slog.ErrorContext(c.Context(), "request failed",
-		"method", c.Method(),
-		"path", c.Path(),
-		"request_id", requestid.FromContext(c),
+		"method", strings.Clone(c.Method()),
+		"path", strings.Clone(c.Path()),
+		"request_id", strings.Clone(requestid.FromContext(c)),
 		"error", err,
 	)
 }
