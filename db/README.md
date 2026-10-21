@@ -19,6 +19,10 @@ Anything driver-specific lives in its own subpackage instead:
 
 - [`db/postgres`](postgres) — a `*bun.DB` connection builder and Postgres
   error classification (unique/foreign-key violation → constraint name).
+  `New()` reads `DB_URL` and the `DB_*` pool variables itself; a service
+  that loads its own configuration builds a `postgres.Config` and calls
+  `Open(cfg)`, which returns an error (never a panic) whose text never
+  contains the DSN's password.
 
 A future MySQL (or other) driver would get the same treatment: its own
 `db/mysql` subpackage, `db`'s repository and models reused as-is.
