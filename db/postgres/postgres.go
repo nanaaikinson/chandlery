@@ -4,10 +4,13 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,7 +21,7 @@ import (
 	"github.com/uptrace/bun/extra/bundebug"
 )
 
-// modelRegistrars are run against every *bun.DB built by New. Callback-based
+// modelRegistrars are run against every *bun.DB built by New or Open. Callback-based
 // so models register themselves from their own init() instead of db
 // importing internal/models directly, which would create an import cycle.
 // Guarded by registrarsMu since the intended usage (registering from init())
@@ -29,7 +32,7 @@ var (
 	modelRegistrars []func(*bun.DB)
 )
 
-// RegisterModelFunc queues fn to run against every *bun.DB built by New —
+// RegisterModelFunc queues fn to run against every *bun.DB built by New or Open —
 // bun requires models used only via m2m relations to be registered explicitly.
 func RegisterModelFunc(fn func(*bun.DB)) {
 	registrarsMu.Lock()
@@ -64,8 +67,8 @@ type Config struct {
 	// them forever.
 	ConnMaxLifetime time.Duration
 	ConnMaxIdleTime time.Duration
-	// Debug logs every query with its arguments (bundebug). Never in
-	// production.
+	// Debug logs every failed query with its arguments to stderr
+	// (bundebug, not verbose). Never in production.
 	Debug bool
 }
 
@@ -82,21 +85,53 @@ func ConfigFromEnv() Config {
 	}
 }
 
-// LogValue keeps the DSN's password out of a log line that includes the
-// Config.
+// A Config never shows its DSN's password, however it is printed: through
+// slog (LogValue), fmt with any verb (Format), or JSON, including slog's JSON
+// handler, when it is a field of something larger (MarshalJSON). Each shows
+// the redacted form.
+
+// redacted is what a Config prints as.
+type redacted struct {
+	DSN             string        `json:"dsn"`
+	MaxOpenConns    int           `json:"max_open_conns"`
+	ConnMaxLifetime time.Duration `json:"conn_max_lifetime"`
+	ConnMaxIdleTime time.Duration `json:"conn_max_idle_time"`
+	Debug           bool          `json:"debug"`
+}
+
+func (c Config) redacted() redacted {
+	return redacted{redactDSN(c.DSN), c.MaxOpenConns, c.ConnMaxLifetime, c.ConnMaxIdleTime, c.Debug}
+}
+
+// LogValue implements slog.LogValuer.
 func (c Config) LogValue() slog.Value {
+	r := c.redacted()
 	return slog.GroupValue(
-		slog.String("dsn", redactDSN(c.DSN)),
-		slog.Int("max_open_conns", c.MaxOpenConns),
-		slog.Duration("conn_max_lifetime", c.ConnMaxLifetime),
-		slog.Duration("conn_max_idle_time", c.ConnMaxIdleTime),
-		slog.Bool("debug", c.Debug),
+		slog.String("dsn", r.DSN),
+		slog.Int("max_open_conns", r.MaxOpenConns),
+		slog.Duration("conn_max_lifetime", r.ConnMaxLifetime),
+		slog.Duration("conn_max_idle_time", r.ConnMaxIdleTime),
+		slog.Bool("debug", r.Debug),
 	)
 }
+
+// Format implements fmt.Formatter, for every verb.
+func (c Config) Format(f fmt.State, _ rune) {
+	r := c.redacted()
+	fmt.Fprintf(f, "{DSN:%s MaxOpenConns:%d ConnMaxLifetime:%s ConnMaxIdleTime:%s Debug:%t}",
+		r.DSN, r.MaxOpenConns, r.ConnMaxLifetime, r.ConnMaxIdleTime, r.Debug)
+}
+
+// MarshalJSON implements json.Marshaler.
+func (c Config) MarshalJSON() ([]byte, error) { return json.Marshal(c.redacted()) }
 
 // Open opens a *bun.DB with cfg using bun's own pgdriver (a lightweight,
 // pure-Go Postgres driver maintained alongside bun). It does no network I/O:
 // call Ping to check the database is reachable.
+//
+// pgdriver still fills what the DSN leaves out from PGHOST, PGPORT, PGUSER
+// and PGDATABASE, so a DSN that names its host, user and database is the
+// whole story.
 //
 // Unlike New it returns an error instead of panicking, and the error never
 // contains the DSN: pgdriver's parse errors quote it whole, password
@@ -147,30 +182,74 @@ func New() *bun.DB {
 }
 
 // newConnector builds pgdriver's connector, turning the panic pgdriver
-// raises for a DSN it can't parse into an error that names the DSN only with
-// its password redacted.
+// raises for a DSN it rejects into an error. The error names the DSN with its
+// password redacted, and keeps pgdriver's reason ("sslmode 'requre' is not
+// supported") unless that reason could carry part of the DSN: a URL parse
+// error quotes its input, so it is only "not a valid URL". A runtime error is
+// a bug in pgdriver, not a bad DSN, so it panics on.
 func newConnector(dsn string) (connector *pgdriver.Connector, err error) {
 	defer func() {
-		if r := recover(); r != nil {
-			connector = nil
-			err = fmt.Errorf("db/postgres: invalid DSN %s", redactDSN(dsn))
+		r := recover()
+		if r == nil {
+			return
 		}
+		if re, ok := r.(runtime.Error); ok {
+			panic(re)
+		}
+		connector = nil
+		err = fmt.Errorf("db/postgres: invalid DSN %s: %s", redactDSN(dsn), dsnRejection(dsn, r))
 	}()
 	return pgdriver.NewConnector(pgdriver.WithDSN(dsn)), nil
 }
 
+// dsnRejection is pgdriver's reason for rejecting dsn, when it is safe to
+// print.
+func dsnRejection(dsn string, r any) string {
+	if e, ok := r.(error); ok {
+		var urlErr *url.Error
+		if errors.As(e, &urlErr) {
+			return "not a valid URL"
+		}
+	}
+	msg := fmt.Sprint(r)
+	if u, err := url.Parse(dsn); err == nil && u.User != nil {
+		if pw, ok := u.User.Password(); ok && pw != "" && strings.Contains(msg, pw) {
+			return "rejected by the driver"
+		}
+	}
+	if strings.Contains(msg, dsn) || strings.Contains(msg, "@") {
+		return "rejected by the driver"
+	}
+	return msg
+}
+
 // redactDSN names where dsn points (scheme, user, host and database) and
 // nothing else: no password, and no query string, which libpq-style DSNs use
-// for password= too. Anything without a scheme and host is a placeholder,
-// since an unparseable string is no safer to print whole.
+// for password= too. Anything it can't read with confidence is a
+// placeholder, since a half-read string is no safer to print. In particular
+// a password that isn't percent-encoded and holds a "/", "#" or "?" makes
+// url.Parse misplace it into the host, path or fragment; the "@" left behind
+// there, or a userinfo-less URL that still has one, gives it away.
 func redactDSN(dsn string) string {
 	if dsn == "" {
 		return ""
 	}
+	const unreadable = "(unparseable)"
 	u, err := url.Parse(dsn)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return "(unparseable)"
+	if err != nil || u.Scheme == "" {
+		return unreadable
 	}
+	if u.User == nil && strings.Contains(dsn, "@") ||
+		strings.ContainsAny(u.Host, "@") || strings.Contains(u.Path, "@") ||
+		strings.Contains(u.RawQuery, "@") || strings.Contains(u.Fragment, "@") ||
+		strings.HasSuffix(u.Host, ":") {
+		return unreadable
+	}
+	if u.Host == "" && u.Scheme != "postgres" && u.Scheme != "postgresql" {
+		return unreadable
+	}
+	// A unix-socket DSN has no host; its host= query parameter isn't shown
+	// with the rest of the query string.
 	out := &url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}
 	if u.User != nil {
 		out.User = url.User(u.User.Username())

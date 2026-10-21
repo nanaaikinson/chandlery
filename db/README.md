@@ -22,7 +22,9 @@ Anything driver-specific lives in its own subpackage instead:
   `New()` reads `DB_URL` and the `DB_*` pool variables itself; a service
   that loads its own configuration builds a `postgres.Config` and calls
   `Open(cfg)`, which returns an error (never a panic) whose text never
-  contains the DSN's password.
+  contains the DSN's password. A `Config` never prints its password, through
+  slog, fmt or JSON. pgdriver still fills what a DSN leaves out from
+  `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE`, so name all four in the DSN.
 
 A future MySQL (or other) driver would get the same treatment: its own
 `db/mysql` subpackage, `db`'s repository and models reused as-is.

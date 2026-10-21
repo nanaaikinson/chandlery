@@ -6,6 +6,7 @@ package s3
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -119,20 +120,48 @@ func ConfigFromEnv() Config {
 	}
 }
 
-// LogValue keeps the secret key out of a log line that includes the Config.
-func (c Config) LogValue() slog.Value {
+// A Config never shows its secret key, however it is printed: through slog
+// (LogValue), fmt with any verb (Format), or JSON, including slog's JSON
+// handler, when it is a field of something larger (MarshalJSON).
+
+// redacted is what a Config prints as.
+type redacted struct {
+	Endpoint        string `json:"endpoint"`
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+	Region          string `json:"region"`
+	UseSSL          bool   `json:"use_ssl"`
+}
+
+func (c Config) redacted() redacted {
 	secret := ""
 	if c.SecretAccessKey != "" {
 		secret = "[REDACTED]"
 	}
+	return redacted{c.Endpoint, c.AccessKeyID, secret, c.Region, c.UseSSL}
+}
+
+// LogValue implements slog.LogValuer.
+func (c Config) LogValue() slog.Value {
+	r := c.redacted()
 	return slog.GroupValue(
-		slog.String("endpoint", c.Endpoint),
-		slog.String("access_key_id", c.AccessKeyID),
-		slog.String("secret_access_key", secret),
-		slog.String("region", c.Region),
-		slog.Bool("use_ssl", c.UseSSL),
+		slog.String("endpoint", r.Endpoint),
+		slog.String("access_key_id", r.AccessKeyID),
+		slog.String("secret_access_key", r.SecretAccessKey),
+		slog.String("region", r.Region),
+		slog.Bool("use_ssl", r.UseSSL),
 	)
 }
+
+// Format implements fmt.Formatter, for every verb.
+func (c Config) Format(f fmt.State, _ rune) {
+	r := c.redacted()
+	fmt.Fprintf(f, "{Endpoint:%s AccessKeyID:%s SecretAccessKey:%s Region:%s UseSSL:%t}",
+		r.Endpoint, r.AccessKeyID, r.SecretAccessKey, r.Region, r.UseSSL)
+}
+
+// MarshalJSON implements json.Marshaler.
+func (c Config) MarshalJSON() ([]byte, error) { return json.Marshal(c.redacted()) }
 
 // NewDisk opens a Disk against bucket on the server cfg describes. Unlike
 // ConfigFromEnv it has no defaults: an empty endpoint or credential is an
