@@ -6,9 +6,11 @@ package s3
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/url"
 	"path"
@@ -91,15 +93,93 @@ func WithPublicBaseURL(base string) Option {
 	return func(d *Disk) { d.publicBaseURL = strings.TrimSuffix(base, "/") }
 }
 
-// New opens a Disk against bucket on the server at Endpoint(). It doesn't
-// perform any network I/O itself (the underlying client dials lazily, same
-// as db/postgres.New and cache/redis.New) — call EnsureBucket if the bucket
-// might not exist yet.
-func New(bucket string, opts ...Option) (*Disk, error) {
-	client, err := minio.New(Endpoint(), &minio.Options{
-		Creds:  credentials.NewStaticV4(AccessKeyID(), SecretAccessKey(), ""),
-		Secure: env.GetBool("S3_USE_SSL", false),
-		Region: Region(),
+// Config is how to reach an S3-compatible server. ConfigFromEnv reads it from
+// the environment, which is what New does; a service that owns its
+// configuration builds one itself and passes it to NewDisk.
+type Config struct {
+	// Endpoint is host:port, no scheme.
+	Endpoint        string
+	AccessKeyID     string
+	SecretAccessKey string
+	// Region may be empty, letting the SDK or server pick.
+	Region string
+	// UseSSL speaks HTTPS to Endpoint.
+	UseSSL bool
+}
+
+// ConfigFromEnv reads S3_ENDPOINT, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY
+// (each with its local default, see Endpoint, AccessKeyID and
+// SecretAccessKey), S3_REGION and S3_USE_SSL (false).
+func ConfigFromEnv() Config {
+	return Config{
+		Endpoint:        Endpoint(),
+		AccessKeyID:     AccessKeyID(),
+		SecretAccessKey: SecretAccessKey(),
+		Region:          Region(),
+		UseSSL:          env.GetBool("S3_USE_SSL", false),
+	}
+}
+
+// A Config never shows its secret key, however it is printed: through slog
+// (LogValue), fmt with any verb (Format), or JSON, including slog's JSON
+// handler, when it is a field of something larger (MarshalJSON).
+
+// redacted is what a Config prints as.
+type redacted struct {
+	Endpoint        string `json:"endpoint"`
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+	Region          string `json:"region"`
+	UseSSL          bool   `json:"use_ssl"`
+}
+
+func (c Config) redacted() redacted {
+	secret := ""
+	if c.SecretAccessKey != "" {
+		secret = "[REDACTED]"
+	}
+	return redacted{c.Endpoint, c.AccessKeyID, secret, c.Region, c.UseSSL}
+}
+
+// LogValue implements slog.LogValuer.
+func (c Config) LogValue() slog.Value {
+	r := c.redacted()
+	return slog.GroupValue(
+		slog.String("endpoint", r.Endpoint),
+		slog.String("access_key_id", r.AccessKeyID),
+		slog.String("secret_access_key", r.SecretAccessKey),
+		slog.String("region", r.Region),
+		slog.Bool("use_ssl", r.UseSSL),
+	)
+}
+
+// Format implements fmt.Formatter, for every verb.
+func (c Config) Format(f fmt.State, _ rune) {
+	r := c.redacted()
+	fmt.Fprintf(f, "{Endpoint:%s AccessKeyID:%s SecretAccessKey:%s Region:%s UseSSL:%t}",
+		r.Endpoint, r.AccessKeyID, r.SecretAccessKey, r.Region, r.UseSSL)
+}
+
+// MarshalJSON implements json.Marshaler.
+func (c Config) MarshalJSON() ([]byte, error) { return json.Marshal(c.redacted()) }
+
+// NewDisk opens a Disk against bucket on the server cfg describes. Unlike
+// ConfigFromEnv it has no defaults: an empty endpoint or credential is an
+// error, rather than a quiet fallback to a local development server. It
+// doesn't perform any network I/O itself (the underlying client dials
+// lazily, same as db/postgres.Open and cache/redis.New) — call EnsureBucket
+// if the bucket might not exist yet.
+func NewDisk(cfg Config, bucket string, opts ...Option) (*Disk, error) {
+	switch {
+	case cfg.Endpoint == "":
+		return nil, errors.New("storage/s3: empty endpoint")
+	case cfg.AccessKeyID == "", cfg.SecretAccessKey == "":
+		return nil, errors.New("storage/s3: empty credentials")
+	}
+	client, err := minio.New(cfg.Endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
+		Secure: cfg.UseSSL,
+		Region: cfg.Region,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("storage/s3: %w", err)
@@ -110,6 +190,12 @@ func New(bucket string, opts ...Option) (*Disk, error) {
 		opt(d)
 	}
 	return d, nil
+}
+
+// New opens a Disk against bucket with ConfigFromEnv. Prefer NewDisk in a
+// service that loads its own configuration.
+func New(bucket string, opts ...Option) (*Disk, error) {
+	return NewDisk(ConfigFromEnv(), bucket, opts...)
 }
 
 // EnsureBucket creates the Disk's bucket if it doesn't already exist. Call

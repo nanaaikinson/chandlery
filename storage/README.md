@@ -30,8 +30,12 @@ Backend-specific pieces live in their own subpackage:
   connects using `S3_ENDPOINT`/`S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY`
   (via `Endpoint()`/`AccessKeyID()`/`SecretAccessKey()`), defaulting to
   MinIO's own out-of-the-box dev credentials so a local container works
-  with zero configuration; call `EnsureBucket` once at startup if the
-  bucket might not exist yet. `TemporaryUrl`/`PresignedPutUrl` are real
+  with zero configuration. A service that loads its own configuration
+  builds an `s3.Config` and calls `NewDisk(cfg, bucket, opts...)` instead,
+  which has no defaults: an empty endpoint or credential is an error rather
+  than a quiet fallback to a dev server; a `Config` never prints its secret
+  key, through slog, fmt or JSON. Call `EnsureBucket` once at startup
+  if the bucket might not exist yet. `TemporaryUrl`/`PresignedPutUrl` are real
   SigV4-signed URLs (no local crypto scheme needed, unlike `storage/local`).
   Directory operations are all derived from S3's flat key namespace — a
   "directory" is either a zero-byte marker object at `path+"/"`
