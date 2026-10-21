@@ -53,9 +53,19 @@ func run(m *testing.M) int {
 	return m.Run()
 }
 
+// perThreadMalloc keeps MongoDB's TCMalloc on per-thread caches. The official
+// image sets GLIBC_TUNABLES=glibc.pthread.rseq=0 so that TCMalloc can claim
+// rseq for per-CPU caches, and Linux 6.19 through 7.0.13 break TCMalloc's
+// use of rseq (SERVER-121912): on those kernels MongoDB 8 refuses to start
+// rather than risk memory corruption, and CI runners have moved onto them.
+// Leaving rseq to glibc, its default, makes TCMalloc fall back to
+// per-thread caches, which every kernel runs. A test container loses
+// nothing it needs; per-CPU caches only matter under production load.
+var perThreadMalloc = testcontainers.WithEnv(map[string]string{"GLIBC_TUNABLES": "glibc.pthread.rseq=1"})
+
 // start brings up one MongoDB container and returns a connected client.
 func start(ctx context.Context, image string, opts ...testcontainers.ContainerCustomizer) (*mongo.Client, string, func(), error) {
-	container, err := tcmongo.Run(ctx, image, opts...)
+	container, err := tcmongo.Run(ctx, image, append(opts, perThreadMalloc)...)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("starting container: %w", err)
 	}
