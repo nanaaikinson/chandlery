@@ -74,6 +74,36 @@ func TestConfigRedactsDSNsURLParseMisreads(t *testing.T) {
 	}
 }
 
+// A DSN url.Parse misreads, because the password isn't percent-encoded and
+// holds "@" then "#", "/" or "?", is refused: connecting would dial a host
+// made of part of the password, and the dial error would print it.
+func TestOpenRefusesAmbiguousDSNs(t *testing.T) {
+	t.Parallel()
+	for _, dsn := range []string{
+		"postgres://app:Tr0ub@" + secret + "#Zq9@db.example.com:5432/wb",
+		"postgres://app:Tr0ub@" + secret + "/Zq9@db.example.com:5432/wb",
+		"postgres://app:Tr0ub@" + secret + "?Zq9@db.example.com:5432/wb",
+		"postgres://app:" + secret + "#x@db.example.com:5432/wb",
+		"postgres://db.example.com:5432/wb#" + secret,
+	} {
+		db, err := chandlerypg.Open(chandlerypg.Config{DSN: dsn})
+		if err == nil {
+			db.Close()
+			t.Errorf("Open(%q) succeeded", dsn)
+			continue
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("Open(%q) error quotes part of the password: %v", dsn, err)
+		}
+	}
+	// A percent-encoded password with the same characters is fine.
+	db, err := chandlerypg.Open(chandlerypg.Config{DSN: "postgres://app:Tr0ub%40s%23Zq9@db.example.com:5432/wb"})
+	if err != nil {
+		t.Fatalf("Open with an encoded password: %v", err)
+	}
+	db.Close()
+}
+
 // A DSN that parses as a URL but that pgdriver rejects keeps pgdriver's
 // reason, so a typo can be found, and still never the password.
 func TestOpenKeepsTheDriversReason(t *testing.T) {

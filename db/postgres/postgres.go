@@ -140,6 +140,11 @@ func Open(cfg Config) (*bun.DB, error) {
 	if cfg.DSN == "" {
 		return nil, errors.New("db/postgres: empty DSN")
 	}
+	if u, err := url.Parse(cfg.DSN); err == nil && ambiguousDSN(cfg.DSN, u) {
+		// Connecting would dial a host made of part of the password, and the
+		// dial error would print it.
+		return nil, errors.New("db/postgres: DSN is ambiguous: percent-encode the password")
+	}
 	connector, err := newConnector(cfg.DSN)
 	if err != nil {
 		return nil, err
@@ -239,10 +244,7 @@ func redactDSN(dsn string) string {
 	if err != nil || u.Scheme == "" {
 		return unreadable
 	}
-	if u.User == nil && strings.Contains(dsn, "@") ||
-		strings.ContainsAny(u.Host, "@") || strings.Contains(u.Path, "@") ||
-		strings.Contains(u.RawQuery, "@") || strings.Contains(u.Fragment, "@") ||
-		strings.HasSuffix(u.Host, ":") {
+	if ambiguousDSN(dsn, u) {
 		return unreadable
 	}
 	if u.Host == "" && u.Scheme != "postgres" && u.Scheme != "postgresql" {
@@ -255,6 +257,19 @@ func redactDSN(dsn string) string {
 		out.User = url.User(u.User.Username())
 	}
 	return out.String()
+}
+
+// ambiguousDSN reports whether url.Parse may have misread dsn: a password
+// that isn't percent-encoded and holds "/", "#" or "?" ends the userinfo
+// early, leaving part of it in the host, path, query or fragment, with an
+// "@" there or a userinfo-less URL that still has one. A Postgres DSN never
+// has a fragment.
+func ambiguousDSN(dsn string, u *url.URL) bool {
+	return u.Fragment != "" ||
+		u.User == nil && strings.Contains(dsn, "@") ||
+		strings.Contains(u.Host, "@") || strings.Contains(u.Path, "@") ||
+		strings.Contains(u.RawQuery, "@") ||
+		strings.HasSuffix(u.Host, ":")
 }
 
 // Ping verifies connectivity to the database.
